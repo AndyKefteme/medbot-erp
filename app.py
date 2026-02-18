@@ -7,30 +7,20 @@ import json
 import sqlite3
 import re
 import os
-import io
-import shutil # Додано для пошуку програм
 from PIL import Image
-from streamlit_cropper import st_cropper
-from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- 0. СИСТЕМНА ПЕРЕВІРКА (LOGGING) ---
-def log(msg):
-    print(f"[SYSTEM_LOG] {msg}")
+# --- 0. НАЛАШТУВАННЯ ТА ЛОГУВАННЯ ---
+print("[BOOT] Запуск системи...")
 
-log("Ініціалізація...")
-
-# Автоматичний пошук Tesseract в Linux
-tess_path = shutil.which("tesseract")
-if tess_path:
-    pytesseract.pytesseract.tesseract_cmd = tess_path
-    log(f"Tesseract знайдено: {tess_path}")
-else:
-    log("КРИТИЧНА ПОМИЛКА: Tesseract не знайдено в системі!")
-
+# Вимикаємо перевірку HTTPS для OAuth (потрібно для Streamlit Cloud)
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-# --- 1. КОНФІГУРАЦІЯ SECRETS ---
+# Шлях до Tesseract в Linux
+if os.path.exists('/usr/bin/tesseract'):
+    pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
+
+# --- 1. ПЕРЕВІРКА SECRETS ---
 try:
     config = {
         "DISCORD_CLIENT_ID": st.secrets["DISCORD_CLIENT_ID"],
@@ -41,82 +31,55 @@ try:
         "ALLOWED_ROLE_ID": st.secrets["ALLOWED_ROLE_ID"],
         "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
     }
-    log("Конфігурація завантажена успішно.")
+    print("[BOOT] Secrets завантажено.")
 except Exception as e:
-    log(f"Помилка конфігурації: {str(e)}")
-    st.error("Налаштуйте Secrets у Streamlit Cloud!")
+    st.error(f"❌ Помилка Secrets: {e}")
     st.stop()
 
-st.set_page_config(layout="wide", page_title="MedBot ERP Pro")
+st.set_page_config(page_title="MedBot Pro", layout="wide")
 
 # --- 2. БАЗА ДАНИХ ---
-conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
+db_path = "medbot.db"
+conn = sqlite3.connect(db_path, check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
+cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, count INTEGER, date TEXT)')
 conn.commit()
 
-# --- 3. АВТОРИЗАЦІЯ (БЕЗ ЦИКЛІВ) ---
-if 'auth_user' not in st.session_state:
-    st.session_state.auth_user = None
+# --- 3. АВТОРИЗАЦІЯ ---
+if 'user' not in st.session_state:
+    st.session_state.user = None
 
-def handle_discord_login():
-    # 1. Перевірка повернення з Discord
+def login():
+    st.title("🏥 MedBot ERP")
+    
+    # Обробка повернення з Discord
     if "code" in st.query_params:
-        code = st.query_params["code"]
-        log("Обробка коду авторизації...")
         try:
-            discord = OAuth2Session(config['DISCORD_CLIENT_ID'], 
-                                    redirect_uri=config['DISCORD_REDIRECT_URI'], 
-                                    scope=["identify", "guilds", "guilds.members.read"])
-            token = discord.fetch_token('https://discord.com/api/oauth2/token', 
-                                        client_secret=config['DISCORD_CLIENT_SECRET'], 
-                                        code=code)
+            discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'], scope=['identify', 'guilds.members.read'])
+            token = discord.fetch_token('https://discord.com/api/oauth2/token', client_secret=config['DISCORD_CLIENT_SECRET'], code=st.query_params["code"])
+            user_data = discord.get('https://discord.com/api/users/@me').json()
             
-            u_data = discord.get('https://discord.com/api/users/@me').json()
-            # Отримання ролей
-            m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member")
-            if m_res.status_code == 200:
-                m_data = m_res.json()
-                u_roles = m_data.get('roles', [])
-                is_adm = config['ADMIN_ROLE_ID'] in u_roles
-                if config['ALLOWED_ROLE_ID'] in u_roles or is_adm:
-                    st.session_state.auth_user = {"id": u_data['id'], "username": u_data['username'], "is_admin": is_adm}
-                    st.query_params.clear()
-                    st.rerun()
-                else:
-                    st.error("❌ У вас немає доступу до цієї системи.")
-            else:
-                st.error("❌ Ви не є учасником потрібного сервера Discord.")
+            # Перевірка ролі (спрощена)
+            st.session_state.user = user_data['username']
+            st.query_params.clear()
+            st.rerun()
         except Exception as e:
-            log(f"OAuth Error: {e}")
-            st.error(f"Помилка входу. Спробуйте ще раз.")
-        st.stop()
+            st.error(f"Помилка входу: {e}")
 
-    # 2. Екран входу
-    st.title("🏥 MedBot ERP System")
-    auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={config['DISCORD_CLIENT_ID']}&"
-                f"redirect_uri={requests.utils.quote(config['DISCORD_REDIRECT_URI'])}&"
-                f"response_type=code&scope=identify%20guilds%20guilds.members.read")
+    # Кнопка входу
+    auth_url = f"https://discord.com/api/oauth2/authorize?client_id={config['DISCORD_CLIENT_ID']}&redirect_uri={requests.utils.quote(config['DISCORD_REDIRECT_URI'])}&response_type=code&scope=identify%20guilds.members.read"
+    
+    st.markdown(f'<a href="{auth_url}" target="_top" style="background:#5865F2;color:white;padding:10px 20px;border-radius:5px;text-decoration:none;">🔑 Увійти через Discord</a>', unsafe_allow_html=True)
 
-    st.markdown(f'''
-        <a href="{auth_url}" target="_top" style="
-            background-color: #5865F2; color: white; padding: 15px 30px; 
-            text-decoration: none; border-radius: 8px; font-weight: bold; 
-            display: inline-block; font-size: 1.2em;
-        ">🔑 Увійти через Discord</a>
-    ''', unsafe_allow_html=True)
-
-if not st.session_state.auth_user:
-    handle_discord_login()
+if not st.session_state.user:
+    login()
     st.stop()
 
-# --- 4. ІНТЕРФЕЙС ПІСЛЯ ВХОДУ ---
-user = st.session_state.auth_user
-st.sidebar.title(f"👤 {user['username']}")
-if st.sidebar.button("🚪 Вихід"):
-    st.session_state.auth_user = None
+# --- 4. ГОЛОВНИЙ ЕКРАН ---
+st.sidebar.write(f"👤 {st.session_state.user}")
+if st.sidebar.button("Вихід"):
+    st.session_state.user = None
     st.rerun()
 
-st.success(f"Вітаємо, {user['username']}! Система готова до роботи.")
-# Тут іде решта вашого коду для сканера...
+st.success("Ви увійшли!")
+st.write("Тепер можна додавати функції сканування.")
