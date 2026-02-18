@@ -13,17 +13,15 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- 0. НАЛАШТУВАННЯ TESSERACT ДЛЯ LINUX (STREAMLIT CLOUD) ---
-# Вказуємо системний шлях до Tesseract, який встановився через packages.txt
+# --- 0. НАЛАШТУВАННЯ ДЛЯ STREAMLIT CLOUD ---
+# Вказуємо шлях до Tesseract (має бути встановлений через packages.txt)
 if os.path.exists('/usr/bin/tesseract'):
     pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
-elif os.path.exists('/usr/local/bin/tesseract'):
-    pytesseract.pytesseract.tesseract_cmd = r'/usr/local/bin/tesseract'
 
-# --- 1. УНІВЕРСАЛЬНА КОНФІГУРАЦІЯ ---
-# Дозволяємо OAuth працювати через HTTPS проксі Streamlit
+# Дозволяємо роботу OAuth2Session
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
+# --- 1. КОНФІГУРАЦІЯ (SECRETS) ---
 if os.path.exists("config.json"):
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -39,12 +37,12 @@ else:
             "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
         }
     except Exception as e:
-        st.error(f"❌ Помилка Secrets: Перевірте налаштування в Streamlit Cloud. ({e})")
+        st.error(f"❌ Помилка: Налаштуйте Secrets у Streamlit Cloud! ({e})")
         st.stop()
 
 st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
 
-# --- 2. БАЗА ДАНИХ (Логіка збережена) ---
+# --- 2. БАЗА ДАНИХ ---
 conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
@@ -52,13 +50,16 @@ cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY)'
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
 conn.commit()
 
-# --- 3. ОПТИМІЗОВАНЕ РОЗПІЗНАННЯ ---
+# --- 3. ФУНКЦІЇ РОЗПІЗНАВАННЯ ---
 def ocr_process(image_np, is_id=False):
+    # Покращення зображення для Tesseract
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     txt = pytesseract.image_to_string(thresh, config='--psm 7')
+    
     if is_id:
         return "".join(re.findall(r'\d+', txt))
+    # Лишаємо тільки літери для імен/прізвищ
     return re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
 
 def save_user_coords(u_id, coords):
@@ -83,19 +84,30 @@ if 'scanned_data' not in st.session_state: st.session_state.scanned_data = []
 if 'passport_payload' not in st.session_state: st.session_state.passport_payload = []
 if 'file_uploader_key' not in st.session_state: st.session_state.file_uploader_key = 0
 
-# --- 5. АВТОРИЗАЦІЯ (Ваш візуал + надійність) ---
+# --- 5. АВТОРИЗАЦІЯ ---
 def handle_discord_login():
     client_id = config['DISCORD_CLIENT_ID']
     redirect_uri = config['DISCORD_REDIRECT_URI']
     scope = "identify guilds guilds.members.read"
-    auth_url = f"https://discord.com/api/oauth2/authorize?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code&scope={scope}"
+    
+    # Формування URL
+    auth_url = (
+        f"https://discord.com/api/oauth2/authorize?"
+        f"client_id={client_id}&"
+        f"redirect_uri={requests.utils.quote(redirect_uri)}&"
+        f"response_type=code&"
+        f"scope={requests.utils.quote(scope)}"
+    )
     
     st.title("🏥 MedBot ERP System")
-    # Використовуємо target="_top" для гарантованого переходу
+    st.write("Для входу використовуйте кнопку нижче:")
+    
+    # Кнопка з target="_top" примусово перенаправляє браузер
     login_html = f'''
         <a href="{auth_url}" target="_top" style="
-            background-color: #5865F2; color: white; padding: 12px 24px; 
-            text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;
+            background-color: #5865F2; color: white; padding: 15px 30px; 
+            text-decoration: none; border-radius: 8px; font-weight: bold; 
+            display: inline-block; font-size: 18px;
         ">🔑 Увійти через Discord</a>
     '''
     st.markdown(login_html, unsafe_allow_html=True)
@@ -107,7 +119,7 @@ def handle_discord_login():
             token = discord.fetch_token('https://discord.com/api/oauth2/token', client_secret=config['DISCORD_CLIENT_SECRET'], code=qp['code'])
             u_data = discord.get('https://discord.com/api/users/@me').json()
             
-            # Перевірка ролей (Ваша логіка)
+            # Перевірка ролей
             m_data = discord.get(f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member").json()
             u_roles = m_data.get('roles', [])
             is_adm = config['ADMIN_ROLE_ID'] in u_roles
@@ -118,17 +130,23 @@ def handle_discord_login():
                 st.query_params.clear()
                 st.rerun()
             else:
-                st.error("❌ У вас немає доступу до системи.")
+                st.error("❌ У вас немає доступу до системи (відсутня роль).")
         except Exception as e:
-            st.error(f"Помилка входу: {e}")
+            st.error(f"Помилка авторизації: {e}")
 
+# Перевірка входу
 if not st.session_state.auth_user:
     handle_discord_login()
     st.stop()
 
 user = st.session_state.auth_user
 
-# --- 6. МЕНЮ ТА ВІЗУАЛ (Повністю з вашого старого коду) ---
+# Перевірка чорного списку
+if cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (user['id'],)).fetchone():
+    st.error("❌ Ваш доступ заблоковано адміністратором.")
+    st.stop()
+
+# --- 6. ОСНОВНИЙ ІНТЕРФЕЙС (ВАШ ДИЗАЙН) ---
 st.sidebar.title(f"👤 {user['username']}")
 if user['is_admin']: st.sidebar.subheader("👑 Адміністратор")
 else: st.sidebar.caption("🩺 Співробітник")
@@ -139,87 +157,102 @@ if menu == "🚪 Вихід":
     st.session_state.auth_user = None
     st.rerun()
 
-elif menu == "📊 Адмін-панель":
-    if not user['is_admin']:
-        st.warning("Доступ заборонено.")
-    else:
-        st.header("🛡 Управління")
-        t_logs, t_ban = st.tabs(["📝 Логи", "🚫 Бан"])
-        with t_logs:
-            h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
-            st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
-        with t_ban:
-            bid = st.text_input("Discord ID")
-            if st.button("🚫 Бан"):
-                cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
-                conn.commit()
-                st.success("Користувача заблоковано!")
+elif menu == "📊 Адмін-панель" and user['is_admin']:
+    st.header("🛡 Управління системою")
+    t_logs, t_ban = st.tabs(["📝 Останні звіти", "🚫 Блокування"])
+    with t_logs:
+        h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
+        st.table([{"Користувач": r[1], "К-сть паспортів": r[2], "Дата": r[3]} for r in h])
+    with t_ban:
+        bid = st.text_input("Введіть Discord ID користувача")
+        if st.button("Заблокувати"):
+            cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
+            conn.commit()
+            st.success(f"Користувача {bid} додано до чорного списку!")
 
 elif menu == "⚙️ Налаштування":
-    st.header("📐 Трафарет")
-    if st.button("🗑 Очистити координати"):
+    st.header("📐 Налаштування трафарету")
+    if st.button("🗑 Скинути всі зони"):
         save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None})
         st.rerun()
-    f = st.file_uploader("Завантажте зразок", type=['png','jpg','jpeg'])
+        
+    f = st.file_uploader("Завантажте фото-зразок для налаштування", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        target = st.selectbox("Виберіть поле для налаштування", ["Surname", "Name", "ID"])
+        st.info(f"Виділіть зону для: {target}")
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button("💾 Зберегти"):
+        
+        if st.button("💾 Зберегти зону"):
             coords = load_user_coords(user['id'])
             coords[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             save_user_coords(user['id'], coords)
-            st.success(f"Зону {target} збережено!")
+            st.success(f"Зону розпізнавання для '{target}' збережено!")
 
 elif menu == "📄 Сканер":
     current_coords = load_user_coords(user['id'])
     if not all(current_coords.values()):
-        st.warning("⚠️ Спочатку налаштуйте координати!")
+        st.warning("⚠️ Спочатку налаштуйте зони розпізнавання в меню 'Налаштування'!")
     else:
-        st.header("📸 Новий звіт")
-        p_files = st.file_uploader("1. Паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"p_{st.session_state.file_uploader_key}")
-        if p_files and st.button("🔍 Розпізнати"):
+        st.header("📸 Масове розпізнавання паспортів")
+        p_files = st.file_uploader("1. Завантажте фото паспортів", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"p_{st.session_state.file_uploader_key}")
+        
+        if p_files and st.button("🔍 Почати сканування"):
             st.session_state.scanned_data = []
             st.session_state.passport_payload = []
-            for i, f in enumerate(p_files):
-                img_pil = Image.open(f).convert("RGB").resize((1920, 1080))
-                img_np = np.array(img_pil)
-                res = {}
-                for lbl, (x, y, w, h) in current_coords.items():
-                    crop = img_np[int(y):int(y+h), int(x):int(x+w)]
-                    res[lbl] = ocr_process(crop, is_id=(lbl=="ID"))
-                st.session_state.scanned_data.append(res)
-                buf = compress_image(f)
-                st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", buf.read(), "image/jpeg")))
+            
+            with st.spinner("Обробка зображень..."):
+                for i, f in enumerate(p_files):
+                    img_pil = Image.open(f).convert("RGB").resize((1920, 1080))
+                    img_np = np.array(img_pil)
+                    res = {}
+                    for lbl, (x, y, w, h) in current_coords.items():
+                        crop = img_np[int(y):int(y+h), int(x):int(x+w)]
+                        res[lbl] = ocr_process(crop, is_id=(lbl=="ID"))
+                    
+                    st.session_state.scanned_data.append(res)
+                    buf = compress_image(f)
+                    st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", buf.read(), "image/jpeg")))
             st.rerun()
 
         if st.session_state.scanned_data:
-            st.subheader("📝 Перевірка даних")
-            final = []
+            st.subheader("📝 Перевірка та редагування")
+            final_results = []
             for idx, item in enumerate(st.session_state.scanned_data):
                 cols = st.columns([3, 3, 2])
                 s = cols[0].text_input(f"Прізвище #{idx+1}", item['Surname'], key=f"s_{idx}")
                 n = cols[1].text_input(f"Ім'я #{idx+1}", item['Name'], key=f"n_{idx}")
                 u = cols[2].text_input(f"ID #{idx+1}", item['ID'], key=f"u_{idx}")
-                final.append({"Surname": s, "Name": n, "ID": u})
+                final_results.append({"Surname": s, "Name": n, "ID": u})
             
-            c_files = st.file_uploader("2. Докази розрахунку", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"c_{st.session_state.file_uploader_key}")
-            if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
-                if not c_files: st.error("Додайте докази!")
+            c_files = st.file_uploader("2. Додайте фото чеків/виплат", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"c_{st.session_state.file_uploader_key}")
+            
+            if st.button("🚀 ВІДПРАВИТИ ЗВІТ У DISCORD"):
+                if not c_files:
+                    st.error("Помилка: Необхідно додати фото доказів виплат!")
                 else:
-                    msg = f"🏥 **ЗВІТ**\n<@{user['id']}> | {user['username']}\n\n" + \
-                          "\n".join([f"• {r['Surname']} {r['Name']} (ID: {r['ID']})" for r in final])
-                    try:
-                        requests.post(config['DISCORD_WEBHOOK_URL'], data={"content": msg}, files=st.session_state.passport_payload)
-                        c_pay = []
-                        for i, cf in enumerate(c_files):
-                            c_pay.append((f"c{i}", (f"c_{i}.jpg", compress_image(cf).read(), "image/jpeg")))
-                        requests.post(config['DISCORD_WEBHOOK_URL'], data={"content": "💳 **Докази:**"}, files=c_pay)
-                        cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%d.%m.%Y %H:%M")))
-                        conn.commit()
-                        st.success("✅ Надіслано!")
-                        st.session_state.scanned_data = []
-                        st.session_state.file_uploader_key += 1
-                        st.rerun()
-                    except Exception as e: st.error(f"Помилка: {e}")
-
+                    with st.spinner("Надсилання даних..."):
+                        report_text = f"🏥 **НОВИЙ МЕД-ЗВІТ**\nАвтор: <@{user['id']}> ({user['username']})\n\n" + \
+                                     "\n".join([f"• {r['Surname']} {r['Name']} (ID: {r['ID']})" for r in final_results])
+                        
+                        try:
+                            # 1. Надсилаємо текст і паспорти
+                            requests.post(config['DISCORD_WEBHOOK_URL'], data={"content": report_text}, files=st.session_state.passport_payload)
+                            
+                            # 2. Надсилаємо чеки
+                            checks_payload = []
+                            for i, cf in enumerate(c_files):
+                                c_buf = compress_image(cf)
+                                checks_payload.append((f"c{i}", (f"c_{i}.jpg", c_buf.read(), "image/jpeg")))
+                            requests.post(config['DISCORD_WEBHOOK_URL'], data={"content": "💳 **Фото доказів виплат:**"}, files=checks_payload)
+                            
+                            # 3. Логування
+                            cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final_results), datetime.now().strftime("%d.%m.%Y %H:%M")))
+                            conn.commit()
+                            
+                            st.success("✅ Звіт успішно надіслано в Discord!")
+                            st.session_state.scanned_data = []
+                            st.session_state.file_uploader_key += 1 # Скидання завантажувачів
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Помилка при надсиланні: {e}")
