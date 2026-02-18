@@ -118,11 +118,6 @@ def login():
     st.write("---")
     st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", url, use_container_width=True, type="primary")
 
-# Перевірка авторизації
-if st.session_state.user is None:
-    login()
-    st.stop()
-
 # --- МЕНЮ (З ПЕРЕВІРКОЮ НА NONE) ---
 u = st.session_state.user
 if u and 'name' in u:
@@ -187,4 +182,5 @@ elif menu == "Сканер":
                 st.success("✅ Надіслано!")
                 st.session_state.data = []
                 st.rerun()
+
 
