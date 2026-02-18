@@ -1,0 +1,7 @@
+[server]
+# Вимикаємо watchdog, який викликає помилку inotify
+fileWatcherType = "none"
+
+[browser]
+# Вимикаємо збір статистики, щоб полегшити запуск
+gatherUsageStats = false
