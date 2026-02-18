@@ -87,7 +87,23 @@ def handle_discord_login():
     auth_url, _ = discord.authorization_url('https://discord.com/api/oauth2/authorize')
     
     st.title("🏥 MedBot ERP System")
-    login_html = f'<a href="{auth_url}" target="_self" style="background-color: #5865F2; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">🔑 Увійти через Discord</a>'
+    st.write("Для початку роботи необхідно авторизуватися через ваш Discord аккаунт.")
+    
+    # Використовуємо HTML-кнопку з target="_top" для примусового переходу
+    login_html = f'''
+        <a href="{auth_url}" target="_top" style="
+            background-color: #5865F2;
+            color: white;
+            padding: 15px 30px;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 18px;
+            display: inline-block;
+            text-align: center;
+            margin-top: 20px;
+        ">🔑 Увійти через Discord</a>
+    '''
     st.markdown(login_html, unsafe_allow_html=True)
     
     qp = st.query_params
@@ -239,3 +255,4 @@ else:
                             st.session_state.file_uploader_key += 1
                             st.rerun()
                         except Exception as e: st.error(f"Помилка: {e}")
+
