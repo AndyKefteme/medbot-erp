@@ -1,8 +1,13 @@
 [server]
-# Вимикаємо моніторинг файлів для економії ресурсів
+# Вимикаємо моніторинг файлів, щоб Streamlit не перезавантажувався від кожної картинки
 fileWatcherType = "none"
-# Вимикаємо застарілі попередження
 enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+primaryColor = "#5865F2"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#FAFAFA"
