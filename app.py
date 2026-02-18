@@ -13,7 +13,7 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- НАЛАШТУВАННЯ СЕРВЕРА ---
+# --- НАЛАШТУВАННЯ ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 if os.path.exists('/usr/bin/tesseract'):
     pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
@@ -43,7 +43,7 @@ except Exception as e:
     st.error(f"Помилка Secrets: {e}")
     st.stop()
 
-# --- ФУНКЦІЇ ---
+# --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def ocr_box(img_np, is_id=False):
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     _, thr = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -59,22 +59,20 @@ def img_to_bytes(img_file):
     return buf.read()
 
 # --- СЕСІЯ ---
-if 'user' not in st.session_state: 
-    st.session_state.user = None
-if 'data' not in st.session_state: 
-    st.session_state.data = []
+if 'user' not in st.session_state: st.session_state.user = None
+if 'data' not in st.session_state: st.session_state.data = []
 
 # --- АВТОРИЗАЦІЯ ---
 def login():
     st.title("🏥 MedBot ERP")
     
-    # Визначаємо scopes як константу
+    # Визначаємо суворий список scopes
     SCOPES = ['identify', 'guilds.members.read']
     
     qp = st.query_params
     if "code" in qp:
         try:
-            # Створюємо сесію
+            # Створюємо сесію OAuth
             sess = OAuth2Session(conf["ID"], redirect_uri=conf["URI"], scope=SCOPES)
             
             # Обмінюємо код на токен
@@ -84,54 +82,58 @@ def login():
                 code=qp["code"]
             )
             
-            # Якщо Discord додав зайвий scope, ми його ігноруємо для бібліотеки
-            if 'scope' in token:
-                sess.scope = SCOPES 
+            # ХАК: Якщо Discord додав зайвий scope, примусово повертаємо очікуваний,
+            # щоб бібліотека не викидала помилку "Scope has changed"
+            sess.scope = SCOPES 
 
             u_info = sess.get('https://discord.com/api/users/@me').json()
-            m_info = sess.get(f"https://discord.com/api/users/@me/guilds/{conf['G_ID']}/member").json()
+            m_res = sess.get(f"https://discord.com/api/users/@me/guilds/{conf['G_ID']}/member")
             
-            roles = m_info.get('roles', [])
-            
-            # Перевірка наявності даних перед записом
-            if u_info.get('username') and (conf["R_ID"] in roles or conf["A_ID"] in roles):
-                st.session_state.user = {
-                    "id": u_info['id'], 
-                    "name": u_info['username'], 
-                    "adm": conf["A_ID"] in roles
-                }
-                st.query_params.clear()
-                st.rerun()
+            if m_res.status_code == 200:
+                m_info = m_res.json()
+                roles = m_info.get('roles', [])
+                if conf["R_ID"] in roles or conf["A_ID"] in roles:
+                    # Зберігаємо дані в сесію ТІЛЬКИ якщо все успішно
+                    st.session_state.user = {
+                        "id": u_info['id'], 
+                        "name": u_info['username'], 
+                        "adm": conf["A_ID"] in roles
+                    }
+                    st.query_params.clear()
+                    st.rerun()
+                else:
+                    st.error("❌ У вас немає потрібної ролі на сервері.")
             else:
-                st.error("❌ Доступ заборонено: перевірте ролі в Discord.")
+                st.error("❌ Ви не є учасником потрібного сервера.")
+                
         except Exception as e: 
             st.error(f"Помилка авторизації: {e}")
+            if st.button("Скинути сесію"):
+                st.query_params.clear()
+                st.rerun()
 
-    # Посилання та кнопка
-    url = f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&redirect_uri={requests.utils.quote(conf['URI'])}&response_type=code&scope={'%20'.join(SCOPES)}"
+    # Формуємо URL для авторизації
+    joined_scopes = "%20".join(SCOPES)
+    url = (f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&"
+           f"redirect_uri={requests.utils.quote(conf['URI'])}&"
+           f"response_type=code&scope={joined_scopes}")
     
     st.write("---")
     st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", url, use_container_width=True, type="primary")
     st.write("---")
 
-# Запуск логіки входу
+# Перевірка авторизації
 if st.session_state.user is None:
     login()
     st.stop()
 
-# --- МЕНЮ (Тепер тут є захист від порожнього 'user') ---
+# --- МЕНЮ (З ПЕРЕВІРКОЮ НА NONE) ---
 u = st.session_state.user
-
-# Додаткова перевірка на всякий випадок
-if u is not None and 'name' in u:
+if u and 'name' in u:
     menu = st.sidebar.radio(f"👤 {u['name']}", ["Сканер", "Налаштування", "Вихід"])
 else:
     st.session_state.user = None
     st.rerun()
-
-# --- МЕНЮ ---
-u = st.session_state.user
-menu = st.sidebar.radio(f"👤 {u['name']}", ["Сканер", "Налаштування", "Вихід"])
 
 if menu == "Вихід":
     st.session_state.user = None
@@ -182,13 +184,10 @@ elif menu == "Сканер":
                 msg = f"🏥 **ЗВІТ** від <@{u['id']}>\n" + "\n".join([f"• {r['Surname']} {r['Name']} (ID: {r['ID']})" for r in st.session_state.data])
                 requests.post(conf["WEB"], data={"content": msg}, files=st.session_state.payload)
                 if cheks:
-                    c_files = [(f"c{i}", (f"c{i}.jpg", img_to_bytes(cf), "image/jpeg")) for i, cf in enumerate(cheks)]
-                    requests.post(conf["WEB"], data={"content": "💳 Чеки:"}, files=c_files)
+                    c_f = [(f"c{i}", (f"c{i}.jpg", img_to_bytes(cf), "image/jpeg")) for i, cf in enumerate(cheks)]
+                    requests.post(conf["WEB"], data={"content": "💳 Чеки:"}, files=c_f)
                 cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (u['id'], u['name'], len(st.session_state.data), datetime.now().strftime("%d.%m %H:%M")))
                 conn.commit()
                 st.success("✅ Надіслано!")
                 st.session_state.data = []
                 st.rerun()
-
-
-
