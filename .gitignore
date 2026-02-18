@@ -1,17 +1,16 @@
-# Секрети
+# Секрети та налаштування
 config.json
 .env
-secrets.toml
+.streamlit/secrets.toml
 
-# База даних
+# База даних (вона створиться на сервері сама)
 *.sqlite
 *.db
 
 # Python
 __pycache__/
 *.py[cod]
-venv/
 .venv/
 
-# Streamlit
-.streamlit/secrets.toml
+# Моделі OCR (вони завантажаться один раз на сервері)
+ocr_models/
