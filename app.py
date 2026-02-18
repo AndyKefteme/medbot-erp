@@ -100,23 +100,31 @@ def handle_discord_login():
     )
     
     st.title("🏥 MedBot ERP System")
-    st.write("Для входу використовуйте кнопку нижче:")
+    st.write("Будь ласка, авторизуйтесь для доступу до системи.")
+
+    # Метод 1: Нативна кнопка Streamlit + JS перехід
+    # Це найбільш стабільний спосіб для Linux-хостингів
+    if st.button("🔑 Увійти через Discord", type="primary"):
+        js = f"window.top.location.href = '{auth_url}';"
+        st.components.v1.html(f"<script>{js}</script>", height=0)
+        st.stop()
+
+    # Метод 2: Резервне посилання (якщо кнопка не спрацювала)
+    st.markdown(f"""
+        <div style="margin-top: 20px;">
+            <p style="font-size: 0.8em; color: gray;">Якщо кнопка не спрацювала, 
+            <a href="{auth_url}" target="_top">натисніть тут</a></p>
+        </div>
+    """, unsafe_allow_html=True)
     
-    # Кнопка з target="_top" примусово перенаправляє браузер
-    login_html = f'''
-        <a href="{auth_url}" target="_top" style="
-            background-color: #5865F2; color: white; padding: 15px 30px; 
-            text-decoration: none; border-radius: 8px; font-weight: bold; 
-            display: inline-block; font-size: 18px;
-        ">🔑 Увійти через Discord</a>
-    '''
-    st.markdown(login_html, unsafe_allow_html=True)
-    
+    # Обробка повернення з Discord
     qp = st.query_params
     if "code" in qp:
         try:
             discord = OAuth2Session(client_id, redirect_uri=redirect_uri, scope=scope.split())
-            token = discord.fetch_token('https://discord.com/api/oauth2/token', client_secret=config['DISCORD_CLIENT_SECRET'], code=qp['code'])
+            token = discord.fetch_token('https://discord.com/api/oauth2/token', 
+                                        client_secret=config['DISCORD_CLIENT_SECRET'], 
+                                        code=qp['code'])
             u_data = discord.get('https://discord.com/api/users/@me').json()
             
             # Перевірка ролей
@@ -130,7 +138,7 @@ def handle_discord_login():
                 st.query_params.clear()
                 st.rerun()
             else:
-                st.error("❌ У вас немає доступу до системи (відсутня роль).")
+                st.error("❌ У вас немає доступу (відсутня роль).")
         except Exception as e:
             st.error(f"Помилка авторизації: {e}")
 
@@ -256,3 +264,4 @@ elif menu == "📄 Сканер":
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ Помилка при надсиланні: {e}")
+
