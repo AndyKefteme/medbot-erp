@@ -85,7 +85,7 @@ def handle_discord_login():
     
     # Використовуємо надійну HTML кнопку для переходу
     st.markdown(f'''
-        <a href="{auth_url}" target="_self">
+        <a href="{auth_url}" target="_blank">
             <button style="background-color: #5865F2; color: white; border: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; font-size: 18px; cursor: pointer; width: 100%;">
                 🔑 Увійти через Discord
             </button>
@@ -212,3 +212,4 @@ else:
         st.header("🛡 Управління")
         rows = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC").fetchall()
         st.table([{"Користувач": r[1], "Звітів": r[2], "Дата": r[3]} for r in rows])
+
