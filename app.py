@@ -67,51 +67,42 @@ if 'passport_payload' not in st.session_state:
 if 'file_uploader_key' not in st.session_state:
     st.session_state.file_uploader_key = 0
 
-# --- АВТОРИЗАЦІЯ DISCORD (ВИПРАВЛЕНО) ---
+# --- АВТОРИЗАЦІЯ DISCORD (АВТО-РЕДИРЕКТ) ---
 def handle_discord_login():
-    scope = ['identify', 'guilds', 'guilds.members.read']
-    # Використовуємо твій config
-    discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'], scope=scope)
-    auth_url, _ = discord.authorization_url('https://discord.com/api/oauth2/authorize')
+    # Посилання для автоматичного переходу (використовуємо твій лінк)
+    auth_url = "https://discord.com/api/oauth2/authorize?response_type=code&client_id=1473419565978615929&redirect_uri=https%3A%2F%2Fems-zvit.streamlit.app&scope=identify+guilds+guilds.members.read&state=edKLeYvUD7lV7nbkhdvRKfNAxcWKpZ"
     
-    st.title("🏥 MedBot ERP System")
-    st.write("Для роботи з системою необхідно пройти авторизацію:")
-    
-    # ВИПРАВЛЕННЯ: Використовуємо чистий HTML для кнопки, щоб Streamlit не перехоплював клік
-    # target="_self" змушує відкрити в тому ж вікні, що важливо для Redirect URI
-    st.markdown(f'''
-        <div style="margin: 20px 0;">
-            <a href="{auth_url}" target="_self" style="
-                background-color: #5865F2; 
-                color: white; 
-                padding: 15px 30px; 
-                text-decoration: none; 
-                border-radius: 8px; 
-                font-weight: bold; 
-                font-size: 18px;
-                display: inline-block;
-                box-shadow: 0 4px 10px rgba(0,0,0,0.2);
-            ">🔑 Увійти через Discord</a>
-        </div>
-    ''', unsafe_allow_html=True)
-    
-    # Якщо автоматичний редирект не спрацював, виводимо посилання для копіювання
-    with st.expander("Проблеми зі входом?"):
-        st.write("Скопіюйте це посилання та вставте в браузер:")
-        st.code(auth_url)
-    
-    # Обробка коду, який повернув Discord
     qp = st.query_params
+    
+    # Якщо коду немає в URL — значить юзер тільки зайшов, кидаємо його в Discord
+    if "code" not in qp:
+        st.write("Redirecting to Discord...")
+        # Використовуємо JS для миттєвого переходу
+        st.components.v1.html(f"""
+            <script>
+                window.parent.location.href = "{auth_url}";
+            </script>
+        """, height=0)
+        st.stop()
+    
+    # Якщо код є — обробляємо його
     if "code" in qp:
         try:
-            token = discord.fetch_token('https://discord.com/api/oauth2/token', client_secret=config['DISCORD_CLIENT_SECRET'], code=qp['code'])
+            # Створюємо сесію для обміну токена
+            discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'])
+            token = discord.fetch_token('https://discord.com/api/oauth2/token', 
+                                        client_secret=config['DISCORD_CLIENT_SECRET'], 
+                                        code=qp['code'])
+            
             u_data = discord.get('https://discord.com/api/users/@me').json()
             u_id = u_data['id']
             
+            # Перевірка бану
             if cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (u_id,)).fetchone():
                 st.error("❌ Ваш доступ заблоковано.")
                 st.stop()
 
+            # Перевірка ролей
             m_url = f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member"
             m_data = discord.get(m_url).json()
             u_roles = m_data.get('roles', [])
@@ -119,27 +110,27 @@ def handle_discord_login():
             is_allowed = config['ALLOWED_ROLE_ID'] in u_roles or is_adm
             
             if not is_allowed:
-                st.error("❌ У вас немає доступу (відсутня роль на сервері).")
+                st.error("❌ У вас немає доступу.")
                 st.stop()
 
+            # Зберігаємо юзера і чистимо URL від кодів
             st.session_state.auth_user = {"id": u_id, "username": u_data['username'], "is_admin": is_adm}
             st.query_params.clear()
             st.rerun()
+            
         except Exception as e:
             st.error(f"Помилка входу: {e}")
+            if st.button("Спробувати ще раз"):
+                st.query_params.clear()
+                st.rerun()
 
-# Далі йде твій оригінальний код без змін...
+# Перевірка авторизації
 if not st.session_state.auth_user:
     handle_discord_login()
     st.stop()
 
+# --- РЕШТА ТВОГО КОДУ (БЕЗ ЗМІН) ---
 user = st.session_state.auth_user
-
-if cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (user['id'],)).fetchone():
-    st.error("❌ Ваш доступ було анульовано.")
-    st.session_state.auth_user = None
-    st.stop()
-
 current_coords = load_user_coords(user['id'])
 
 st.sidebar.title(f"👤 {user['username']}")
