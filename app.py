@@ -59,59 +59,75 @@ def img_to_bytes(img_file):
     return buf.read()
 
 # --- СЕСІЯ ---
-if 'user' not in st.session_state: st.session_state.user = None
-if 'data' not in st.session_state: st.session_state.data = []
+if 'user' not in st.session_state: 
+    st.session_state.user = None
+if 'data' not in st.session_state: 
+    st.session_state.data = []
 
 # --- АВТОРИЗАЦІЯ ---
 def login():
-    st.markdown("<h1 style='text-align: center;'>🏥 MedBot ERP</h1>", unsafe_allow_html=True)
+    st.title("🏥 MedBot ERP")
     
-    # Використовуємо один чіткий список дозволів
-    # ПРИМІТКА: guilds.members.read зазвичай достатньо, щоб бачити ролі
+    # Визначаємо scopes як константу
     SCOPES = ['identify', 'guilds.members.read']
     
     qp = st.query_params
     if "code" in qp:
-        st.info("🔄 Авторизація... Зачекайте.")
         try:
-            sess = OAuth2Session(
-                conf["ID"], 
-                redirect_uri=conf["URI"], 
-                scope=SCOPES
-            )
-            # Додаємо виправлення для зміни scope, яке іноді робить Discord
+            # Створюємо сесію
+            sess = OAuth2Session(conf["ID"], redirect_uri=conf["URI"], scope=SCOPES)
+            
+            # Обмінюємо код на токен
             token = sess.fetch_token(
                 'https://discord.com/api/oauth2/token', 
                 client_secret=conf["SEC"], 
-                code=qp["code"],
-                include_client_id=True
+                code=qp["code"]
             )
             
-            u = sess.get('https://discord.com/api/users/@me').json()
-            m = sess.get(f"https://discord.com/api/users/@me/guilds/{conf['G_ID']}/member").json()
+            # Якщо Discord додав зайвий scope, ми його ігноруємо для бібліотеки
+            if 'scope' in token:
+                sess.scope = SCOPES 
+
+            u_info = sess.get('https://discord.com/api/users/@me').json()
+            m_info = sess.get(f"https://discord.com/api/users/@me/guilds/{conf['G_ID']}/member").json()
             
-            roles = m.get('roles', [])
-            if conf["R_ID"] in roles or conf["A_ID"] in roles:
-                st.session_state.user = {"id": u['id'], "name": u['username'], "adm": conf["A_ID"] in roles}
+            roles = m_info.get('roles', [])
+            
+            # Перевірка наявності даних перед записом
+            if u_info.get('username') and (conf["R_ID"] in roles or conf["A_ID"] in roles):
+                st.session_state.user = {
+                    "id": u_info['id'], 
+                    "name": u_info['username'], 
+                    "adm": conf["A_ID"] in roles
+                }
                 st.query_params.clear()
                 st.rerun()
             else:
-                st.error("❌ У вас немає потрібної ролі в Discord")
+                st.error("❌ Доступ заборонено: перевірте ролі в Discord.")
         except Exception as e: 
-            st.error(f"Помилка входу: {e}")
-            st.button("Спробувати ще раз", on_click=lambda: st.query_params.clear())
+            st.error(f"Помилка авторизації: {e}")
 
-    # Формуємо URL суворо за списком SCOPES
-    joined_scopes = "%20".join(SCOPES)
-    url = (f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&"
-           f"redirect_uri={requests.utils.quote(conf['URI'])}&"
-           f"response_type=code&scope={joined_scopes}")
+    # Посилання та кнопка
+    url = f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&redirect_uri={requests.utils.quote(conf['URI'])}&response_type=code&scope={'%20'.join(SCOPES)}"
     
     st.write("---")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", url, use_container_width=True, type="primary")
+    st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", url, use_container_width=True, type="primary")
     st.write("---")
+
+# Запуск логіки входу
+if st.session_state.user is None:
+    login()
+    st.stop()
+
+# --- МЕНЮ (Тепер тут є захист від порожнього 'user') ---
+u = st.session_state.user
+
+# Додаткова перевірка на всякий випадок
+if u is not None and 'name' in u:
+    menu = st.sidebar.radio(f"👤 {u['name']}", ["Сканер", "Налаштування", "Вихід"])
+else:
+    st.session_state.user = None
+    st.rerun()
 
 # --- МЕНЮ ---
 u = st.session_state.user
@@ -173,5 +189,6 @@ elif menu == "Сканер":
                 st.success("✅ Надіслано!")
                 st.session_state.data = []
                 st.rerun()
+
 
 
