@@ -13,12 +13,22 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- АДАПТАЦІЯ ПІД LINUX ---
+# --- 0. НАЛАШТУВАННЯ ТА ЛОГУВАННЯ ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+# Функція для виводу логів прямо в інтерфейс
+def debug_log(msg, type="info"):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    full_msg = f"[{timestamp}] {msg}"
+    if type == "info": st.write(f"ℹ️ {full_msg}")
+    elif type == "success": st.success(f"✅ {full_msg}")
+    elif type == "error": st.error(f"❌ {full_msg}")
+
+# Шлях до Tesseract
 if os.path.exists('/usr/bin/tesseract'):
     pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
 
-# --- КОНФІГУРАЦІЯ (SECRETS) ---
+# --- 1. КОНФІГУРАЦІЯ (SECRETS) ---
 try:
     config = {
         "DISCORD_CLIENT_ID": st.secrets["DISCORD_CLIENT_ID"],
@@ -30,71 +40,97 @@ try:
         "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
     }
 except Exception as e:
-    st.error("Налаштуйте SECRETS у панелі Streamlit Cloud!")
+    st.error(f"Помилка Secrets: {e}")
     st.stop()
 
-st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
+st.set_page_config(layout="wide", page_title="MedBot ERP Pro")
 
-# --- БАЗА ДАНИХ ---
-conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
-conn.commit()
-
-# --- ФУНКЦІЇ ---
-def ocr_process(image_np, is_id=False):
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    txt = pytesseract.image_to_string(thresh, config='--psm 7')
-    if is_id: return "".join(re.findall(r'\d+', txt))
-    return re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
-
-def compress_image(image_file):
-    img = Image.open(image_file).convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=70)
-    buf.seek(0)
-    return buf
-
-# --- АВТОРИЗАЦІЯ ---
-if 'auth_user' not in st.session_state: st.session_state.auth_user = None
-if 'scanned_data' not in st.session_state: st.session_state.scanned_data = []
-if 'passport_payload' not in st.session_state: st.session_state.passport_payload = []
-if 'file_uploader_key' not in st.session_state: st.session_state.file_uploader_key = 0
+# --- 2. АВТОРИЗАЦІЯ З ЛОГУВАННЯМ ---
+if 'auth_user' not in st.session_state:
+    st.session_state.auth_user = None
 
 def handle_discord_login():
-    # Перевірка чи ми вже повернулися з кодом
-    params = st.query_params
-    if "code" in params:
-        try:
-            discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'], scope=['identify', 'guilds.members.read'])
-            token = discord.fetch_token('https://discord.com/api/oauth2/token', client_secret=config['DISCORD_CLIENT_SECRET'], code=params["code"])
-            u_data = discord.get('https://discord.com/api/users/@me').json()
-            m_data = discord.get(f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member").json()
-            u_roles = m_data.get('roles', [])
-            is_adm = config['ADMIN_ROLE_ID'] in u_roles
-            if config['ALLOWED_ROLE_ID'] in u_roles or is_adm:
-                st.session_state.auth_user = {"id": u_data['id'], "username": u_data['username'], "is_admin": is_adm}
-                st.query_params.clear()
-                st.rerun()
-        except: pass
-
-    # Красива сторінка входу
-    st.markdown("<h1 style='text-align: center;'>🏥 MedBot ERP System</h1>", unsafe_allow_html=True)
-    auth_url = f"https://discord.com/api/oauth2/authorize?client_id={config['DISCORD_CLIENT_ID']}&redirect_uri={requests.utils.quote(config['DISCORD_REDIRECT_URI'])}&response_type=code&scope=identify%20guilds%20guilds.members.read"
+    st.title("🏥 MedBot ERP System")
+    debug_log("Перевірка параметрів URL...")
     
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown(f'''
-            <div style="text-align: center; margin-top: 50px;">
-                <a href="{auth_url}" target="_top" style="background-color: #5865F2; color: white; padding: 20px 40px; text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 20px; display: inline-block;">🔑 УВІЙТИ ЧЕРЕЗ DISCORD</a>
-            </div>
-        ''', unsafe_allow_html=True)
+    # Отримуємо параметри через query_params
+    qp = st.query_params
+    
+    if "code" in qp:
+        code = qp["code"]
+        debug_log(f"Код отримано: {code[:10]}...", type="success")
+        
+        try:
+            debug_log("Запуск OAuth2Session для обміну коду на токен...")
+            discord = OAuth2Session(
+                config['DISCORD_CLIENT_ID'], 
+                redirect_uri=config['DISCORD_REDIRECT_URI'], 
+                scope=['identify', 'guilds.members.read']
+            )
+            
+            debug_log("Запит до Discord API (/token)...")
+            token = discord.fetch_token(
+                'https://discord.com/api/oauth2/token', 
+                client_secret=config['DISCORD_CLIENT_SECRET'], 
+                code=code
+            )
+            debug_log("Токен отримано успішно!", type="success")
+            
+            debug_log("Запит даних користувача (@me)...")
+            u_data = discord.get('https://discord.com/api/users/@me').json()
+            
+            debug_log(f"Запит ролей для сервера {config['GUILD_ID']}...")
+            m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member")
+            
+            if m_res.status_code == 200:
+                m_data = m_res.json()
+                u_roles = m_data.get('roles', [])
+                is_adm = config['ADMIN_ROLE_ID'] in u_roles
+                is_allowed = config['ALLOWED_ROLE_ID'] in u_roles or is_adm
+                
+                if is_allowed:
+                    debug_log("Доступ дозволено, зберігаємо сесію.", type="success")
+                    st.session_state.auth_user = {"id": u_data['id'], "username": u_data['username'], "is_admin": is_adm}
+                    st.query_params.clear()
+                    st.rerun()
+                else:
+                    debug_log("Доступ заборонено: роль не знайдена.", type="error")
+                    st.write(f"Ваші ролі: `{u_roles}`")
+            else:
+                debug_log(f"Помилка сервера Discord: {m_res.status_code}", type="error")
+                
+        except Exception as e:
+            debug_log(f"Критична помилка процесу: {str(e)}", type="error")
+            st.exception(e)
+        st.stop()
+
+    # Якщо коду немає - малюємо кнопку
+    auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={config['DISCORD_CLIENT_ID']}&"
+                f"redirect_uri={requests.utils.quote(config['DISCORD_REDIRECT_URI'])}&"
+                f"response_type=code&scope=identify%20guilds.members.read")
+
+    st.info("Очікування натискання кнопки...")
+    
+    # Використовуємо HTML-посилання для надійності
+    st.markdown(f'''
+        <div style="text-align: center; border: 2px solid #5865F2; padding: 20px; border-radius: 10px;">
+            <p>Натисніть кнопку нижче. Вас має перенаправити на Discord.</p>
+            <a href="{auth_url}" target="_top" style="
+                background-color: #5865F2; color: white; padding: 15px 30px; 
+                text-decoration: none; border-radius: 8px; font-weight: bold; 
+                display: inline-block; font-size: 1.2em;
+            ">🔑 АВТОРИЗУВАТИСЬ</a>
+        </div>
+    ''', unsafe_allow_html=True)
+    
+    # Додаткова перевірка Redirect URI
+    st.caption(f"Ваш поточний Redirect URI: `{config['DISCORD_REDIRECT_URI']}`")
 
 if not st.session_state.auth_user:
     handle_discord_login()
     st.stop()
+
+st.success(f"Ви ввійшли як {st.session_state.auth_user['username']}")
 
 # --- ГОЛОВНИЙ ІНТЕРФЕЙС ---
 user = st.session_state.auth_user
@@ -170,3 +206,4 @@ elif menu == "📄 Сканер":
                 st.session_state.scanned_data = []
                 st.session_state.file_uploader_key += 1
                 st.rerun()
+
