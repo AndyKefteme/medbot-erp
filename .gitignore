@@ -1,18 +1,17 @@
-# Секрети та конфігурація
+# Секрети
 config.json
 .env
+secrets.toml
 
-# База даних (SQLite)
+# База даних
 *.sqlite
 *.db
 
-# Тимчасові файли Python
+# Python
 __pycache__/
 *.py[cod]
+venv/
+.venv/
 
-# Налаштування Streamlit (якщо вони локальні)
+# Streamlit
 .streamlit/secrets.toml
-
-# Файли ОС
-.DS_Store
-Thumbs.db
