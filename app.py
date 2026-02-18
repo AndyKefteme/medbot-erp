@@ -66,24 +66,22 @@ if 'data' not in st.session_state: st.session_state.data = []
 def login():
     st.title("🏥 MedBot ERP")
     
-    # Визначаємо суворий список scopes
-    SCOPES = ['identify', 'guilds.members.read']
+    # ДОДАЄМО 'guilds' У СПИСОК, щоб Discord не змінював scope самостійно
+    SCOPES = ['identify', 'guilds', 'guilds.members.read']
     
     qp = st.query_params
     if "code" in qp:
         try:
-            # Створюємо сесію OAuth
             sess = OAuth2Session(conf["ID"], redirect_uri=conf["URI"], scope=SCOPES)
             
-            # Обмінюємо код на токен
+            # Обмін коду на токен
             token = sess.fetch_token(
                 'https://discord.com/api/oauth2/token', 
                 client_secret=conf["SEC"], 
                 code=qp["code"]
             )
             
-            # ХАК: Якщо Discord додав зайвий scope, примусово повертаємо очікуваний,
-            # щоб бібліотека не викидала помилку "Scope has changed"
+            # Додатковий захист: прирівнюємо scope сесії до фактично отриманого
             sess.scope = SCOPES 
 
             u_info = sess.get('https://discord.com/api/users/@me').json()
@@ -93,7 +91,6 @@ def login():
                 m_info = m_res.json()
                 roles = m_info.get('roles', [])
                 if conf["R_ID"] in roles or conf["A_ID"] in roles:
-                    # Зберігаємо дані в сесію ТІЛЬКИ якщо все успішно
                     st.session_state.user = {
                         "id": u_info['id'], 
                         "name": u_info['username'], 
@@ -102,17 +99,17 @@ def login():
                     st.query_params.clear()
                     st.rerun()
                 else:
-                    st.error("❌ У вас немає потрібної ролі на сервері.")
+                    st.error("❌ Немає потрібної ролі.")
             else:
-                st.error("❌ Ви не є учасником потрібного сервера.")
+                st.error("❌ Ви не на сервері.")
                 
         except Exception as e: 
-            st.error(f"Помилка авторизації: {e}")
-            if st.button("Скинути сесію"):
+            st.error(f"Помилка: {e}")
+            if st.button("Очистити і спробувати знову"):
                 st.query_params.clear()
                 st.rerun()
 
-    # Формуємо URL для авторизації
+    # Генеруємо URL з правильними Scopes
     joined_scopes = "%20".join(SCOPES)
     url = (f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&"
            f"redirect_uri={requests.utils.quote(conf['URI'])}&"
@@ -120,7 +117,6 @@ def login():
     
     st.write("---")
     st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", url, use_container_width=True, type="primary")
-    st.write("---")
 
 # Перевірка авторизації
 if st.session_state.user is None:
@@ -191,3 +187,4 @@ elif menu == "Сканер":
                 st.success("✅ Надіслано!")
                 st.session_state.data = []
                 st.rerun()
+
