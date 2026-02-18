@@ -8,29 +8,27 @@ import sqlite3
 import re
 import os
 import io
-import time
 import sys
 from PIL import Image
 from streamlit_cropper import st_cropper
 from datetime import datetime
 from urllib.parse import quote
 
-# --- 1. НАЛАШТУВАННЯ СИСТЕМИ ---
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+# --- 1. ЗАВАНТАЖЕННЯ КОНФІГУРАЦІЇ ---
+def load_config():
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"❌ Не вдалося прочитати config.json: {e}")
+        st.stop()
+
+config = load_config()
+
+# Шлях для моделей OCR
 MODEL_DIR = os.path.join(os.getcwd(), "ocr_models")
 if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
-
-def log_it(msg):
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] [MEDBOT] {msg}")
-    sys.stdout.flush()
-
-# Перевірка Secrets
-if "discord" not in st.secrets:
-    st.error("Налаштуйте Secrets у Streamlit Cloud!")
-    st.stop()
-config = st.secrets["discord"]
 
 st.set_page_config(layout="wide", page_title="MedBot ERP", page_icon="🏥")
 
@@ -41,65 +39,60 @@ cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, c
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
 conn.commit()
 
-# --- 3. OCR ЗАВАНТАЖЕННЯ ---
+# --- 3. OCR (КЕШУВАННЯ) ---
 @st.cache_resource(show_spinner=False)
 def get_ocr_reader():
-    log_it("Завантаження EasyOCR моделей...")
     return easyocr.Reader(['en', 'uk'], gpu=False, model_storage_directory=MODEL_DIR)
 
-# --- 4. ФУНКЦІЇ АВТОРИЗАЦІЇ ---
-def login_page():
+# --- 4. СТОРІНКА ЛОГІНУ ---
+def show_login():
     client_id = str(config['DISCORD_CLIENT_ID']).strip()
     redirect_uri = str(config['DISCORD_REDIRECT_URI']).strip()
     
-    # Формуємо посилання вручну для надійності
+    # Пряме посилання для авторизації
     scope = quote("identify guilds guilds.members.read")
     encoded_redirect = quote(redirect_uri, safe='')
-    auth_url = (
-        f"https://discord.com/api/oauth2/authorize"
-        f"?client_id={client_id}"
-        f"&redirect_uri={encoded_redirect}"
-        f"&response_type=code"
-        f"&scope={scope}"
-    )
+    auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={client_id}"
+                f"&redirect_uri={encoded_redirect}&response_type=code&scope={scope}")
 
     st.title("🏥 MedBot ERP System")
     st.divider()
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("Вхід у систему")
-        st.info(f"Переконайтеся, що в Discord Developer Portal вказано: \n`{redirect_uri}`")
+        st.subheader("Авторизація")
         st.markdown(f'''
-            <a href="{auth_url}" target="_self" style="
-                background-color: #5865F2; color: white; padding: 18px 40px; 
-                text-decoration: none; border-radius: 10px; font-weight: bold; font-size: 20px;
-                display: inline-block;
-            ">🔑 УВІЙТИ ЧЕРЕЗ DISCORD</a>
+            <div style="margin: 20px 0;">
+                <a href="{auth_url}" target="_self" style="
+                    background-color: #5865F2; color: white; padding: 20px 50px; 
+                    text-decoration: none; border-radius: 12px; font-weight: bold; font-size: 24px;
+                    display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                ">🔑 УВІЙТИ ЧЕРЕЗ DISCORD</a>
+            </div>
         ''', unsafe_allow_html=True)
+        st.caption(f"Redirect URI: {redirect_uri}")
 
     with col2:
-        st.subheader("Статус модулів")
+        st.subheader("Система")
         if 'reader' not in st.session_state:
-            with st.spinner("Активація ШІ..."):
+            with st.spinner("Завантаження ШІ..."):
                 st.session_state.reader = get_ocr_reader()
             st.success("✅ OCR Готовий")
             st.rerun()
         else:
-            st.success("✅ OCR Активний")
+            st.success("✅ OCR Працює")
 
-    # Обробка Callback
-    params = st.query_params
-    if "code" in params:
-        log_it("Обробка коду від Discord...")
-        token_data = {
+    # Обробка коду від Discord
+    if "code" in st.query_params:
+        code = st.query_params["code"]
+        data = {
             'client_id': client_id,
             'client_secret': config['DISCORD_CLIENT_SECRET'],
             'grant_type': 'authorization_code',
-            'code': params["code"],
+            'code': code,
             'redirect_uri': redirect_uri
         }
-        r = requests.post('https://discord.com/api/oauth2/token', data=token_data)
+        r = requests.post('https://discord.com/api/oauth2/token', data=data)
         if r.status_code == 200:
             token = r.json()['access_token']
             headers = {"Authorization": f"Bearer {token}"}
@@ -107,103 +100,94 @@ def login_page():
             
             # Перевірка ролі
             g_id = config['GUILD_ID']
-            m_info = requests.get(f'https://discord.com/api/users/@me/guilds/{g_id}/member', headers=headers).json()
+            m_resp = requests.get(f'https://discord.com/api/users/@me/guilds/{g_id}/member', headers=headers)
             
-            roles = m_info.get('roles', [])
-            is_admin = config['ADMIN_ROLE_ID'] in roles
-            is_allowed = config['ALLOWED_ROLE_ID'] in roles or is_admin
-            
-            if is_allowed:
-                st.session_state.auth_user = {"id": u_info['id'], "username": u_info['username'], "is_admin": is_admin}
-                st.query_params.clear()
-                st.rerun()
+            if m_resp.status_code == 200:
+                roles = m_resp.json().get('roles', [])
+                is_admin = config['ADMIN_ROLE_ID'] in roles
+                is_allowed = config['ALLOWED_ROLE_ID'] in roles or is_admin
+                
+                if is_allowed:
+                    st.session_state.auth_user = {"id": u_info['id'], "username": u_info['username'], "is_admin": is_admin}
+                    st.query_params.clear()
+                    st.rerun()
+                else:
+                    st.error("🚫 Немає доступу (відсутня роль).")
             else:
-                st.error("🚫 У вас немає доступу до цієї системи.")
+                st.error("❌ Ви не на сервері.")
         else:
-            st.error("Помилка авторизації. Перевірте Secrets.")
+            st.error("Помилка токена. Перевірте Redirect URI в Discord Dev Portal.")
 
-# --- ПЕРЕВІРКА СЕСІЇ ---
 if 'auth_user' not in st.session_state:
-    login_page()
+    show_login()
     st.stop()
 
-# --- 5. ГОЛОВНИЙ ФУНКЦІОНАЛ ---
+# --- 5. РОБОЧА ЗОНА ---
 user = st.session_state.auth_user
 reader = st.session_state.reader
 
-# Допоміжні функції
-def get_user_coords(u_id):
+def get_coords(u_id):
     res = cursor.execute("SELECT coords_json FROM user_coords WHERE user_id = ?", (u_id,)).fetchone()
     return json.loads(res[0]) if res else {"Surname": None, "Name": None, "ID": None}
 
-def save_user_coords(u_id, data):
-    cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (u_id, json.dumps(data)))
-    conn.commit()
+current_coords = get_coords(user['id'])
 
-current_coords = get_user_coords(user['id'])
-
-# Меню
 st.sidebar.title(f"👤 {user['username']}")
-page = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
+menu = st.sidebar.radio("Меню", ["📄 Сканер", "⚙️ Налаштування", "📊 Логи", "🚪 Вихід"])
 
-if page == "🚪 Вихід":
+if menu == "🚪 Вихід":
     st.session_state.clear()
     st.rerun()
 
-elif page == "⚙️ Налаштування":
-    st.header("📐 Калібрування зон")
-    file = st.file_uploader("Завантажте зразок", type=['jpg', 'png', 'jpeg'])
-    if file:
-        img = Image.open(file).convert("RGB").resize((1920, 1080))
+elif menu == "⚙️ Налаштування":
+    st.header("📐 Налаштування зон")
+    f = st.file_uploader("Зразок", type=['jpg', 'png'])
+    if f:
+        img = Image.open(f).convert("RGB").resize((1920, 1080))
         target = st.selectbox("Поле", ["Surname", "Name", "ID"])
-        rect = st_cropper(img, realtime_update=True, box_color='red', return_type='box')
+        rect = st_cropper(img, realtime_update=True, box_color='blue', return_type='box')
         if st.button("Зберегти зону"):
             current_coords[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
-            save_user_coords(user['id'], current_coords)
-            st.success(f"Зону {target} збережено!")
+            cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (user['id'], json.dumps(current_coords)))
+            conn.commit()
+            st.success("Збережено!")
 
-elif page == "📄 Сканер":
+elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.warning("Спочатку налаштуйте зони в 'Налаштуваннях'")
+        st.warning("Спочатку налаштуйте зони.")
     else:
-        st.header("📸 Сканування документів")
-        up_files = st.file_uploader("Фото паспортів", accept_multiple_files=True, type=['jpg', 'png'])
-        if up_files and st.button("🔍 Почати"):
-            results = []
-            for f in up_files:
-                img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                data = {}
+        files = st.file_uploader("Фото", accept_multiple_files=True)
+        if files and st.button("🔍 Розпізнати"):
+            res_list = []
+            for f in files:
+                img = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
+                d = {}
                 for lbl, (x, y, w, h) in current_coords.items():
-                    crop = img_np[int(y):int(y+h), int(x):int(x+w)]
-                    txt_list = reader.readtext(crop)
-                    text = " ".join([t[1] for t in txt_list])
-                    data[lbl] = "".join(re.findall(r'\d+', text)) if lbl == "ID" else text.strip().capitalize()
-                results.append(data)
-            st.session_state.scan_results = results
+                    crop = img[int(y):int(y+h), int(x):int(x+w)]
+                    txt = " ".join([t[1] for t in reader.readtext(crop)])
+                    d[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else txt.strip().capitalize()
+                res_list.append(d)
+            st.session_state.scan_res = res_list
             st.rerun()
 
-        if 'scan_results' in st.session_state:
-            st.subheader("Перевірка та відправка")
-            final_list = []
-            for i, res in enumerate(st.session_state.scan_results):
+        if 'scan_res' in st.session_state:
+            final = []
+            for i, r in enumerate(st.session_state.scan_res):
                 c1, c2, c3 = st.columns(3)
-                s = c1.text_input(f"Прізвище #{i}", res['Surname'], key=f"s{i}")
-                n = c2.text_input(f"Ім'я #{i}", res['Name'], key=f"n{i}")
-                u = c3.text_input(f"ID #{i}", res['ID'], key=f"u{i}")
-                final_list.append({"Surname": s, "Name": n, "ID": u})
+                s = c1.text_input(f"Прізвище {i}", r['Surname'], key=f"s{i}")
+                n = c2.text_input(f"Ім'я {i}", r['Name'], key=f"n{i}")
+                u = c3.text_input(f"ID {i}", r['ID'], key=f"u{i}")
+                final.append({"Surname": s, "Name": n, "ID": u})
             
             if st.button("🚀 ВІДПРАВИТИ В DISCORD"):
-                report = f"🏥 **Звіт від** <@{user['id']}>\n" + "\n".join([f"• {x['Surname']} {x['Name']} (ID: {x['ID']})" for x in final_list])
-                requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": report})
-                cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final_list), datetime.now().strftime("%Y-%m-%d %H:%M")))
+                msg = f"🏥 **Звіт від** <@{user['id']}>\n" + "\n".join([f"• {x['Surname']} {x['Name']} ID:{x['ID']}" for x in final])
+                requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": msg})
+                cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%d.%m %H:%M")))
                 conn.commit()
                 st.success("Надіслано!")
-                del st.session_state.scan_results
+                del st.session_state.scan_res
 
-elif page == "📊 Адмін-панель":
+elif menu == "📊 Логи":
     if user['is_admin']:
-        st.header("📊 Статистика")
-        logs = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
+        logs = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC").fetchall()
         st.table([{"Юзер": r[1], "К-сть": r[2], "Час": r[3]} for r in logs])
-    else:
-        st.error("Доступ заборонено")
