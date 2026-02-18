@@ -1,0 +1,8 @@
+[server]
+# Вимикаємо моніторинг файлів для економії ресурсів
+fileWatcherType = "none"
+# Вимикаємо застарілі попередження
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
