@@ -46,6 +46,7 @@ def save_user_coords(u_id, coords):
     conn.commit()
 
 def load_user_coords(u_id):
+    if not u_id: return {"Surname": None, "Name": None, "ID": None}
     saved = cursor.execute("SELECT coords_json FROM user_coords WHERE user_id = ?", (u_id,)).fetchone()
     if saved: return json.loads(saved[0])
     return {"Surname": None, "Name": None, "ID": None}
@@ -67,32 +68,25 @@ if 'passport_payload' not in st.session_state:
 if 'file_uploader_key' not in st.session_state:
     st.session_state.file_uploader_key = 0
 
-# --- АВТОРИЗАЦІЯ DISCORD (АВТО-РЕДИРЕКТ) ---
+# --- АВТОРИЗАЦІЯ DISCORD ---
 def handle_discord_login():
     auth_url = "https://discord.com/api/oauth2/authorize?response_type=code&client_id=1473419565978615929&redirect_uri=https%3A%2F%2Fems-zvit.streamlit.app&scope=identify+guilds+guilds.members.read&state=edKLeYvUD7lV7nbkhdvRKfNAxcWKpZ"
     
     qp = st.query_params
     
-    if "code" not in qp:
-        # Відображаємо текст і кнопку як страховку
+    if "code" not in qp and st.session_state.auth_user is None:
         st.title("🏥 MedBot ERP System")
         st.write("Перенаправлення до Discord...")
         
-        # Справжнє посилання, оформлене як кнопка
-        st.markdown(f'''
-            <meta http-equiv="refresh" content="0; url={auth_url}">
-            <a href="{auth_url}" target="_self" style="
-                background-color: #5865F2; color: white; padding: 15px 30px; 
-                text-decoration: none; border-radius: 8px; font-weight: bold; 
-                display: inline-block;
-            ">Натисніть тут, якщо редирект не спрацював</a>
-        ''', unsafe_allow_html=True)
-        
-        # Спроба JS редиректу
+        # Авто-редирект через Meta та JS
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={auth_url}">', unsafe_allow_html=True)
         st.components.v1.html(f"<script>window.parent.location.href = '{auth_url}';</script>", height=0)
+        
+        # Кнопка про всяк випадок
+        st.markdown(f'<a href="{auth_url}" target="_self" style="background-color: #5865F2; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold;">Натисніть тут для входу</a>', unsafe_allow_html=True)
         st.stop()
     
-    if "code" in qp:
+    if "code" in qp and st.session_state.auth_user is None:
         try:
             discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'])
             token = discord.fetch_token('https://discord.com/api/oauth2/token', 
@@ -125,9 +119,23 @@ def handle_discord_login():
             if st.button("Спробувати знову"):
                 st.query_params.clear()
                 st.rerun()
+            st.stop()
 
-# --- РЕШТА ТВОГО КОДУ (БЕЗ ЗМІН) ---
+# Запуск авторизації
+handle_discord_login()
+
+# Перевірка, чи авторизація успішна
+if st.session_state.auth_user is None:
+    st.stop()
+
 user = st.session_state.auth_user
+
+# --- ОСНОВНИЙ ДОДАТОК ---
+if cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (user['id'],)).fetchone():
+    st.error("❌ Ваш доступ було анульовано.")
+    st.session_state.auth_user = None
+    st.stop()
+
 current_coords = load_user_coords(user['id'])
 
 st.sidebar.title(f"👤 {user['username']}")
@@ -138,6 +146,7 @@ menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ На
 
 if menu == "🚪 Вихід":
     st.session_state.auth_user = None
+    st.query_params.clear()
     st.rerun()
 
 elif menu == "📊 Адмін-панель":
@@ -150,22 +159,14 @@ elif menu == "📊 Адмін-панель":
             h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
             st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
         with t_ban:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                bid = st.text_input("Discord ID")
-                if st.button("🚫 Бан"):
-                    cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
-                    conn.commit()
-                    st.rerun()
-            with c2:
-                st.subheader("Список")
-                for r in cursor.execute("SELECT user_id FROM blacklist").fetchall():
-                    bc1, bc2 = st.columns([3, 1])
-                    bc1.code(r[0])
-                    if bc2.button("🗑", key=f"u_{r[0]}"):
-                        cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (r[0],))
-                        conn.commit()
-                        st.rerun()
+            bid = st.text_input("Discord ID")
+            if st.button("🚫 Бан"):
+                cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
+                conn.commit()
+                st.rerun()
+            st.subheader("Список заблокованих")
+            for r in cursor.execute("SELECT user_id FROM blacklist").fetchall():
+                st.code(r[0])
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Трафарет")
@@ -181,11 +182,11 @@ elif menu == "⚙️ Налаштування":
             new_c = current_coords
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             save_user_coords(user['id'], new_c)
-            st.rerun()
+            st.success("Збережено!")
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.warning("⚠️ Налаштуйте координати!")
+        st.warning("⚠️ Налаштуйте координати в меню 'Налаштування'!")
     else:
         st.header("📸 Новий звіт")
         p_files = st.file_uploader("1. Паспорти (макс. 10)", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"p_{st.session_state.file_uploader_key}")
@@ -235,4 +236,3 @@ elif menu == "📄 Сканер":
                         st.session_state.file_uploader_key += 1
                         st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
-
