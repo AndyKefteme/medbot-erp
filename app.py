@@ -66,41 +66,52 @@ if 'data' not in st.session_state: st.session_state.data = []
 def login():
     st.markdown("<h1 style='text-align: center;'>🏥 MedBot ERP</h1>", unsafe_allow_html=True)
     
-    # 1. Перевірка коду в URL
+    # Використовуємо один чіткий список дозволів
+    # ПРИМІТКА: guilds.members.read зазвичай достатньо, щоб бачити ролі
+    SCOPES = ['identify', 'guilds.members.read']
+    
     qp = st.query_params
     if "code" in qp:
         st.info("🔄 Авторизація... Зачекайте.")
         try:
-            sess = OAuth2Session(conf["ID"], redirect_uri=conf["URI"], scope=['identify', 'guilds.members.read'])
-            sess.fetch_token('https://discord.com/api/oauth2/token', client_secret=conf["SEC"], code=qp["code"])
+            sess = OAuth2Session(
+                conf["ID"], 
+                redirect_uri=conf["URI"], 
+                scope=SCOPES
+            )
+            # Додаємо виправлення для зміни scope, яке іноді робить Discord
+            token = sess.fetch_token(
+                'https://discord.com/api/oauth2/token', 
+                client_secret=conf["SEC"], 
+                code=qp["code"],
+                include_client_id=True
+            )
+            
             u = sess.get('https://discord.com/api/users/@me').json()
             m = sess.get(f"https://discord.com/api/users/@me/guilds/{conf['G_ID']}/member").json()
+            
             roles = m.get('roles', [])
             if conf["R_ID"] in roles or conf["A_ID"] in roles:
                 st.session_state.user = {"id": u['id'], "name": u['username'], "adm": conf["A_ID"] in roles}
                 st.query_params.clear()
                 st.rerun()
             else:
-                st.error("❌ У вас немає доступу (необхідна роль в Discord)")
+                st.error("❌ У вас немає потрібної ролі в Discord")
         except Exception as e: 
             st.error(f"Помилка входу: {e}")
-            st.write("Спробуйте натиснути кнопку ще раз.")
+            st.button("Спробувати ще раз", on_click=lambda: st.query_params.clear())
 
-    # 2. Формування URL
-    url = f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&redirect_uri={requests.utils.quote(conf['URI'])}&response_type=code&scope=identify%20guilds%20guilds.members.read"
+    # Формуємо URL суворо за списком SCOPES
+    joined_scopes = "%20".join(SCOPES)
+    url = (f"https://discord.com/api/oauth2/authorize?client_id={conf['ID']}&"
+           f"redirect_uri={requests.utils.quote(conf['URI'])}&"
+           f"response_type=code&scope={joined_scopes}")
     
-    # 3. Нативна кнопка (найбільш стабільна)
     st.write("---")
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", url, use_container_width=True, type="primary")
     st.write("---")
-    
-    st.caption("Після натискання вас перенаправить на сайт Discord для підтвердження.")
-
-if not st.session_state.user:
-    login()
-    st.stop()
 
 # --- МЕНЮ ---
 u = st.session_state.user
@@ -162,4 +173,5 @@ elif menu == "Сканер":
                 st.success("✅ Надіслано!")
                 st.session_state.data = []
                 st.rerun()
+
 
