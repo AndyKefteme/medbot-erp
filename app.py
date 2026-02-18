@@ -69,26 +69,31 @@ if 'file_uploader_key' not in st.session_state:
 
 # --- АВТОРИЗАЦІЯ DISCORD (АВТО-РЕДИРЕКТ) ---
 def handle_discord_login():
-    # Посилання для автоматичного переходу (використовуємо твій лінк)
     auth_url = "https://discord.com/api/oauth2/authorize?response_type=code&client_id=1473419565978615929&redirect_uri=https%3A%2F%2Fems-zvit.streamlit.app&scope=identify+guilds+guilds.members.read&state=edKLeYvUD7lV7nbkhdvRKfNAxcWKpZ"
     
     qp = st.query_params
     
-    # Якщо коду немає в URL — значить юзер тільки зайшов, кидаємо його в Discord
     if "code" not in qp:
-        st.write("Redirecting to Discord...")
-        # Використовуємо JS для миттєвого переходу
-        st.components.v1.html(f"""
-            <script>
-                window.parent.location.href = "{auth_url}";
-            </script>
-        """, height=0)
+        # Відображаємо текст і кнопку як страховку
+        st.title("🏥 MedBot ERP System")
+        st.write("Перенаправлення до Discord...")
+        
+        # Справжнє посилання, оформлене як кнопка
+        st.markdown(f'''
+            <meta http-equiv="refresh" content="0; url={auth_url}">
+            <a href="{auth_url}" target="_self" style="
+                background-color: #5865F2; color: white; padding: 15px 30px; 
+                text-decoration: none; border-radius: 8px; font-weight: bold; 
+                display: inline-block;
+            ">Натисніть тут, якщо редирект не спрацював</a>
+        ''', unsafe_allow_html=True)
+        
+        # Спроба JS редиректу
+        st.components.v1.html(f"<script>window.parent.location.href = '{auth_url}';</script>", height=0)
         st.stop()
     
-    # Якщо код є — обробляємо його
     if "code" in qp:
         try:
-            # Створюємо сесію для обміну токена
             discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'])
             token = discord.fetch_token('https://discord.com/api/oauth2/token', 
                                         client_secret=config['DISCORD_CLIENT_SECRET'], 
@@ -97,12 +102,10 @@ def handle_discord_login():
             u_data = discord.get('https://discord.com/api/users/@me').json()
             u_id = u_data['id']
             
-            # Перевірка бану
             if cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (u_id,)).fetchone():
                 st.error("❌ Ваш доступ заблоковано.")
                 st.stop()
 
-            # Перевірка ролей
             m_url = f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member"
             m_data = discord.get(m_url).json()
             u_roles = m_data.get('roles', [])
@@ -113,21 +116,15 @@ def handle_discord_login():
                 st.error("❌ У вас немає доступу.")
                 st.stop()
 
-            # Зберігаємо юзера і чистимо URL від кодів
             st.session_state.auth_user = {"id": u_id, "username": u_data['username'], "is_admin": is_adm}
             st.query_params.clear()
             st.rerun()
             
         except Exception as e:
             st.error(f"Помилка входу: {e}")
-            if st.button("Спробувати ще раз"):
+            if st.button("Спробувати знову"):
                 st.query_params.clear()
                 st.rerun()
-
-# Перевірка авторизації
-if not st.session_state.auth_user:
-    handle_discord_login()
-    st.stop()
 
 # --- РЕШТА ТВОГО КОДУ (БЕЗ ЗМІН) ---
 user = st.session_state.auth_user
@@ -238,3 +235,4 @@ elif menu == "📄 Сканер":
                         st.session_state.file_uploader_key += 1
                         st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
