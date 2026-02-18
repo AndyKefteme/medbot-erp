@@ -1,8 +1,8 @@
 streamlit
-streamlit-cropper
+opencv-python-headless
 pytesseract
 requests
 requests-oauthlib
 pillow
-opencv-python-headless
+streamlit-cropper
 numpy
