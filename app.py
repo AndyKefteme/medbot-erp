@@ -13,13 +13,21 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
+# --- 0. НАЛАШТУВАННЯ TESSERACT ДЛЯ LINUX (STREAMLIT CLOUD) ---
+# На Streamlit Cloud шлях зазвичай саме такий. 
+# Це виправить "зависання" при спробі викликати OCR.
+if os.path.exists('/usr/bin/tesseract'):
+    pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
+
 # --- 1. УНІВЕРСАЛЬНА КОНФІГУРАЦІЯ ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 if os.path.exists("config.json"):
+    # Локальний запуск
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
 else:
+    # Запуск на хостингу (Streamlit Cloud)
     try:
         config = {
             "DISCORD_CLIENT_ID": st.secrets["DISCORD_CLIENT_ID"],
@@ -30,8 +38,8 @@ else:
             "ALLOWED_ROLE_ID": st.secrets["ALLOWED_ROLE_ID"],
             "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
         }
-    except Exception:
-        st.error("❌ Secrets не налаштовані в Streamlit Cloud!")
+    except Exception as e:
+        st.error(f"❌ Помилка конфігурації: Перевірте 'Secrets' у налаштуваннях Streamlit. ({e})")
         st.stop()
 
 st.set_page_config(layout="wide", page_title="MedBot ERP", page_icon="🏥")
@@ -212,4 +220,5 @@ else:
         st.header("🛡 Управління")
         rows = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC").fetchall()
         st.table([{"Користувач": r[1], "Звітів": r[2], "Дата": r[3]} for r in rows])
+
 
