@@ -16,11 +16,9 @@ from requests_oauthlib import OAuth2Session
 # --- 0. СИСТЕМНІ НАЛАШТУВАННЯ ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-# Пошук Tesseract в системі Streamlit Cloud
 if os.path.exists('/usr/bin/tesseract'):
     pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
 
-# Функція для виведення логів авторизації на екран
 def auth_log(msg, mode="info"):
     t = datetime.now().strftime("%H:%M:%S")
     if mode == "info": st.info(f"ℹ️ [{t}] {msg}")
@@ -51,7 +49,7 @@ cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, c
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
 conn.commit()
 
-# --- 3. ДОПОМІЖНІ ФУНКЦІЇ ---
+# --- 3. ФУНКЦІЇ OCR ТА ОБРОБКИ ---
 def ocr_process(image_np, is_id=False):
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -66,32 +64,33 @@ def compress_image(image_file):
     buf.seek(0)
     return buf
 
-# --- 4. БЛОК АВТОРИЗАЦІЇ ---
+# --- 4. БЛОК АВТОРИЗАЦІЇ (ВАРІАНТ 2: ПРЯМЕ ПОСИЛАННЯ) ---
 if 'auth_user' not in st.session_state: st.session_state.auth_user = None
 if 'scanned_data' not in st.session_state: st.session_state.scanned_data = []
+if 'passport_payload' not in st.session_state: st.session_state.passport_payload = []
 if 'file_uploader_key' not in st.session_state: st.session_state.file_uploader_key = 0
 
 def handle_discord_login():
     st.markdown("<h1 style='text-align: center;'>🏥 MedBot ERP System</h1>", unsafe_allow_html=True)
     
-    # Секція діагностики (DEBUG)
-    with st.expander("🔍 Статус авторизації (Логи)"):
+    # Секція логів для діагностики
+    with st.expander("🔍 Статус авторизації (Логи)", expanded=True):
         auth_log("Очікування дій користувача...")
+        
+        # Перевірка наявності коду в URL
         qp = st.query_params
         if "code" in qp:
-            auth_log(f"Код отримано: {qp['code'][:10]}...", mode="ok")
+            auth_log(f"Код знайдено! Починаю обмін...", mode="ok")
             try:
                 discord = OAuth2Session(config['DISCORD_CLIENT_ID'], 
                                         redirect_uri=config['DISCORD_REDIRECT_URI'], 
                                         scope=['identify', 'guilds.members.read'])
-                auth_log("Обмін коду на токен...")
+                
                 token = discord.fetch_token('https://discord.com/api/oauth2/token', 
                                             client_secret=config['DISCORD_CLIENT_SECRET'], 
                                             code=qp["code"])
-                auth_log("Токен отримано. Запит даних профілю...")
-                u_data = discord.get('https://discord.com/api/users/@me').json()
                 
-                auth_log(f"Перевірка ролей на сервері {config['GUILD_ID']}...")
+                u_data = discord.get('https://discord.com/api/users/@me').json()
                 m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member")
                 
                 if m_res.status_code == 200:
@@ -99,31 +98,42 @@ def handle_discord_login():
                     u_roles = m_data.get('roles', [])
                     is_adm = config['ADMIN_ROLE_ID'] in u_roles
                     if config['ALLOWED_ROLE_ID'] in u_roles or is_adm:
-                        auth_log("Доступ дозволено!", mode="ok")
                         st.session_state.auth_user = {"id": u_data['id'], "username": u_data['username'], "is_admin": is_adm}
                         st.query_params.clear()
                         st.rerun()
                     else:
-                        auth_log("У вас немає потрібної ролі Discord!", mode="err")
+                        auth_log("Немає потрібної ролі в Discord.", mode="err")
                 else:
-                    auth_log(f"Помилка API: {m_res.status_code}. Перевірте чи ви є на сервері.", mode="err")
+                    auth_log("Ви не учасник сервера Discord.", mode="err")
             except Exception as e:
-                auth_log(f"Помилка процесу: {str(e)}", mode="err")
+                auth_log(f"Помилка OAuth: {str(e)}", mode="err")
 
-    # Кнопка входу (TARGET _TOP обов'язково)
+    # Формування URL
     auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={config['DISCORD_CLIENT_ID']}&"
                 f"redirect_uri={requests.utils.quote(config['DISCORD_REDIRECT_URI'])}&"
                 f"response_type=code&scope=identify%20guilds%20guilds.members.read")
 
-    st.markdown(f'''
-        <div style="text-align: center; margin-top: 30px;">
+    # ВАРІАНТ 2: Пряме посилання з оформленням
+    st.markdown(f"""
+        <div style="text-align: center; margin-top: 50px; padding: 40px; border: 2px dashed #5865F2; border-radius: 15px;">
+            <h3 style="color: #5865F2;">Крок 1: Натисніть на посилання нижче</h3>
+            <p>Вас буде перенаправлено на Discord для підтвердження особи.</p>
+            <br>
             <a href="{auth_url}" target="_top" style="
-                background-color: #5865F2; color: white; padding: 20px 50px; 
-                text-decoration: none; border-radius: 12px; font-weight: bold; 
-                font-size: 22px; display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-            ">🔑 УВІЙТИ ЧЕРЕЗ DISCORD</a>
+                background-color: #5865F2; 
+                color: white; 
+                padding: 20px 45px; 
+                text-decoration: none; 
+                border-radius: 10px; 
+                font-weight: bold; 
+                font-size: 24px; 
+                display: inline-block;
+                box-shadow: 0 4px 15px rgba(88, 101, 242, 0.4);
+            ">🔗 КЛІКНІТЬ ТУТ ДЛЯ ВХОДУ</a>
+            <br><br>
+            <p style="font-size: 0.8em; color: gray;">Якщо посилання не відкривається, вимкніть блокувальник реклами.</p>
         </div>
-    ''', unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 if not st.session_state.auth_user:
     handle_discord_login()
@@ -132,11 +142,14 @@ if not st.session_state.auth_user:
 # --- 5. ОСНОВНИЙ ІНТЕРФЕЙС (ПІСЛЯ ВХОДУ) ---
 user = st.session_state.auth_user
 st.sidebar.title(f"👤 {user['username']}")
-menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмінка", "🚪 Вихід"])
+menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "🚪 Вихід"])
 
 if menu == "🚪 Вихід":
     st.session_state.auth_user = None
     st.rerun()
+
+# (Далі йде стандартна логіка сканера та налаштувань, яку ви мали раніше)
+st.success(f"Вітаємо, {user['username']}! Ви в системі.")
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Трафарет")
@@ -216,3 +229,4 @@ elif menu == "📊 Адмінка" and user['is_admin']:
     st.header("📊 Статистика")
     logs = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
     st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in logs])
+
