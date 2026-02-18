@@ -1,8 +1,8 @@
 streamlit
-opencv-python-headless
-numpy
-easyocr
+streamlit-cropper
+pytesseract
 requests
 requests-oauthlib
-Pillow
-streamlit-cropper
+pillow
+opencv-python-headless
+numpy
