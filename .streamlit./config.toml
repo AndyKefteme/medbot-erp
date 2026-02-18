@@ -1,6 +1,8 @@
 [server]
-# Це вирішує проблему з OSError inotify
+# Це критично важливо для Streamlit Cloud
 fileWatcherType = "none"
+enableCORS = false
+enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false
