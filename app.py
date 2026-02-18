@@ -60,28 +60,39 @@ def compress_image(image_file):
 # --- СТАН СЕСІЇ ---
 if 'auth_user' not in st.session_state:
     st.session_state.auth_user = None
-if 'scanned_data' not in st.session_state:
-    st.session_state.scanned_data = []
 
-# --- АВТОРИЗАЦІЯ (ОБХІД БЛОКУВАННЯ) ---
+# --- АВТОРИЗАЦІЯ (ВИПРАВЛЕНИЙ ПЕРЕХІД) ---
 def handle_discord_login():
-    # Твоє робоче посилання
+    # Твоє пряме посилання
     auth_url = "https://discord.com/api/oauth2/authorize?response_type=code&client_id=1473419565978615929&redirect_uri=https%3A%2F%2Fems-zvit.streamlit.app&scope=identify+guilds+guilds.members.read&state=edKLeYvUD7lV7nbkhdvRKfNAxcWKpZ"
     
     qp = st.query_params
     
+    # Якщо користувач не авторизований і в URL немає коду
     if "code" not in qp and st.session_state.auth_user is None:
-        # Цей скрипт ігнорує фрейми Streamlit і перенаправляє головне вікно браузера
-        st.markdown("### Вхід до системи...")
-        st.components.v1.html(f"""
-            <script>
-                window.top.location.href = "{auth_url}";
-            </script>
-        """, height=0)
-        # Додаткова кнопка, якщо JS заблоковано в самому браузері
-        st.markdown(f'<a href="{auth_url}" target="_top" style="color: white; background: #5865F2; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Натисніть тут, якщо не перекинуло автоматично</a>', unsafe_allow_html=True)
+        st.title("🏥 MedBot ERP System")
+        st.markdown("### Необхідна авторизація")
+        
+        # ВИРІШАЛЬНИЙ МОМЕНТ: target="_top" виводить посилання ЗА МЕЖІ фрейму Streamlit
+        st.markdown(f"""
+            <div style="text-align: center; margin-top: 50px;">
+                <p style="font-size: 1.2rem;">Натисніть кнопку нижче, щоб увійти через Discord:</p>
+                <a href="{auth_url}" target="_top" style="
+                    background-color: #5865F2;
+                    color: white;
+                    padding: 18px 40px;
+                    text-decoration: none;
+                    border-radius: 10px;
+                    font-weight: bold;
+                    font-size: 20px;
+                    display: inline-block;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+                ">🔑 УВІЙТИ В СИСТЕМУ</a>
+            </div>
+        """, unsafe_allow_html=True)
         st.stop()
     
+    # Якщо код прийшов у параметрах
     if "code" in qp and st.session_state.auth_user is None:
         try:
             discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'])
@@ -106,71 +117,72 @@ def handle_discord_login():
                     st.query_params.clear()
                     st.rerun()
                 else:
-                    st.error("🚫 Немає потрібної ролі.")
+                    st.error("🚫 Доступ заборонено (відсутня роль).")
                     st.stop()
             else:
-                st.error("❌ Ви не на сервері.")
+                st.error("❌ Ви не є учасником Discord сервера.")
                 st.stop()
         except Exception as e:
-            st.error(f"Помилка: {e}")
+            st.error(f"Помилка авторизації: {e}")
             st.stop()
 
-# Запуск
+# Старт логіки
 handle_discord_login()
 
-if st.session_state.auth_user:
-    user = st.session_state.auth_user
-    current_coords = load_user_coords(user['id'])
+# --- ОСНОВНИЙ КОД (ПІСЛЯ ВХОДУ) ---
+user = st.session_state.auth_user
+current_coords = load_user_coords(user['id'])
 
-    st.sidebar.title(f"👤 {user['username']}")
-    menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
+st.sidebar.title(f"👤 {user['username']}")
+menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
 
-    if menu == "🚪 Вихід":
-        st.session_state.auth_user = None
-        st.rerun()
+if menu == "🚪 Вихід":
+    st.session_state.auth_user = None
+    st.rerun()
 
-    elif menu == "⚙️ Налаштування":
-        st.header("📐 Трафарет")
-        f = st.file_uploader("Завантажте зразок", type=['png','jpg','jpeg'])
-        if f:
-            img = Image.open(f).convert("RGB").resize((1920, 1080))
-            target = st.selectbox("Зона", ["Surname", "Name", "ID"])
-            rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-            if st.button("💾 Зберегти"):
-                new_c = current_coords
-                new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
-                save_user_coords(user['id'], new_c)
-                st.success("Збережено!")
+elif menu == "⚙️ Налаштування":
+    st.header("📐 Налаштування трафарету")
+    f = st.file_uploader("Завантажте зразок", type=['png','jpg','jpeg'])
+    if f:
+        img = Image.open(f).convert("RGB").resize((1920, 1080))
+        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
+        if st.button("💾 Зберегти"):
+            new_c = current_coords
+            new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
+            save_user_coords(user['id'], new_c)
+            st.success("Збережено!")
 
-    elif menu == "📄 Сканер":
-        if not all(current_coords.values()):
-            st.warning("⚠️ Налаштуйте координати!")
-        else:
-            st.header("📸 Новий звіт")
-            p_files = st.file_uploader("Паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
-            if p_files and st.button("🔍 Розпізнати"):
+elif menu == "📄 Сканер":
+    if not all(current_coords.values()):
+        st.warning("⚠️ Налаштуйте координати в 'Налаштуваннях'!")
+    else:
+        st.header("📸 Новий звіт")
+        p_files = st.file_uploader("Завантажте паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
+        if p_files and st.button("🔍 Розпізнати"):
+            scanned = []
+            for f in p_files:
+                img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
+                res = {}
+                for lbl, (x, y, w, h) in current_coords.items():
+                    crop = img_np[int(y):int(y+h), int(x):int(x+w)]
+                    txt = " ".join([t[1] for t in reader.readtext(crop)])
+                    res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else txt.strip().capitalize()
+                scanned.append(res)
+            st.session_state.scanned_data = scanned
+            st.rerun()
+
+        if st.get('scanned_data' in st.session_state and st.session_state.scanned_data):
+            final = []
+            for idx, item in enumerate(st.session_state.scanned_data):
+                cols = st.columns(3)
+                s = cols[0].text_input(f"Прізвище #{idx}", item['Surname'], key=f"s{idx}")
+                n = cols[1].text_input(f"Ім'я #{idx}", item['Name'], key=f"n{idx}")
+                u = cols[2].text_input(f"ID #{idx}", item['ID'], key=f"u{idx}")
+                final.append({"Surname": s, "Name": n, "ID": u})
+            
+            if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
+                msg = f"🏥 **ЗВІТ** від <@{user['id']}>\n" + "\n".join([f"• {r['Surname']} {r['Name']} #{r['ID']}" for r in final])
+                requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": msg})
+                st.success("Надіслано!")
                 st.session_state.scanned_data = []
-                for f in p_files:
-                    img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                    res = {}
-                    for lbl, (x, y, w, h) in current_coords.items():
-                        crop = img_np[int(y):int(y+h), int(x):int(x+w)]
-                        txt = " ".join([t[1] for t in reader.readtext(crop)])
-                        res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else txt.strip().capitalize()
-                    st.session_state.scanned_data.append(res)
-                st.rerun()
-
-            if st.session_state.scanned_data:
-                final = []
-                for idx, item in enumerate(st.session_state.scanned_data):
-                    cols = st.columns(3)
-                    s = cols[0].text_input(f"Прізвище #{idx}", item['Surname'], key=f"s{idx}")
-                    n = cols[1].text_input(f"Ім'я #{idx}", item['Name'], key=f"n{idx}")
-                    u = cols[2].text_input(f"ID #{idx}", item['ID'], key=f"u{idx}")
-                    final.append({"Surname": s, "Name": n, "ID": u})
-                
-                if st.button("🚀 ВІДПРАВИТИ"):
-                    msg = f"🏥 **ЗВІТ** від <@{user['id']}>\n" + "\n".join([f"{r['Surname']} {r['Name']} #{r['ID']}" for r in final])
-                    requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": msg})
-                    st.success("Надіслано!")
-                    st.session_state.scanned_data = []
