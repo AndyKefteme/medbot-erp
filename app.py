@@ -20,7 +20,7 @@ def load_config():
         with open("config.json", "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        st.error(f"❌ Не вдалося прочитати config.json: {e}")
+        st.error(f"❌ Не вдалося прочитати config.json! Переконайтеся, що файл завантажено на GitHub.")
         st.stop()
 
 config = load_config()
@@ -42,6 +42,7 @@ conn.commit()
 # --- 3. OCR (КЕШУВАННЯ) ---
 @st.cache_resource(show_spinner=False)
 def get_ocr_reader():
+    # Завантажуємо моделі один раз при старті
     return easyocr.Reader(['en', 'uk'], gpu=False, model_storage_directory=MODEL_DIR)
 
 # --- 4. СТОРІНКА ЛОГІНУ ---
@@ -49,7 +50,7 @@ def show_login():
     client_id = str(config['DISCORD_CLIENT_ID']).strip()
     redirect_uri = str(config['DISCORD_REDIRECT_URI']).strip()
     
-    # Пряме посилання для авторизації
+    # Створюємо чисте посилання для авторизації
     scope = quote("identify guilds guilds.members.read")
     encoded_redirect = quote(redirect_uri, safe='')
     auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={client_id}"
@@ -60,7 +61,10 @@ def show_login():
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("Авторизація")
+        st.subheader("Авторизація через Discord")
+        st.warning(f"⚠️ Твій поточний Redirect URI: `{redirect_uri}`")
+        st.info("Якщо після натискання кнопки Discord видає помилку — значить цей URI не збігається з тим, що вказано в Discord Developer Portal!")
+        
         st.markdown(f'''
             <div style="margin: 20px 0;">
                 <a href="{auth_url}" target="_self" style="
@@ -70,21 +74,22 @@ def show_login():
                 ">🔑 УВІЙТИ ЧЕРЕЗ DISCORD</a>
             </div>
         ''', unsafe_allow_html=True)
-        st.caption(f"Redirect URI: {redirect_uri}")
 
     with col2:
-        st.subheader("Система")
+        st.subheader("Статус системи")
         if 'reader' not in st.session_state:
-            with st.spinner("Завантаження ШІ..."):
+            with st.spinner("Завантаження ШІ-моделей..."):
                 st.session_state.reader = get_ocr_reader()
             st.success("✅ OCR Готовий")
             st.rerun()
         else:
             st.success("✅ OCR Працює")
+            st.success("✅ База даних підключена")
 
     # Обробка коду від Discord
-    if "code" in st.query_params:
-        code = st.query_params["code"]
+    params = st.query_params
+    if "code" in params:
+        code = params["code"]
         data = {
             'client_id': client_id,
             'client_secret': config['DISCORD_CLIENT_SECRET'],
@@ -98,7 +103,7 @@ def show_login():
             headers = {"Authorization": f"Bearer {token}"}
             u_info = requests.get('https://discord.com/api/users/@me', headers=headers).json()
             
-            # Перевірка ролі
+            # Перевірка ролі на сервері
             g_id = config['GUILD_ID']
             m_resp = requests.get(f'https://discord.com/api/users/@me/guilds/{g_id}/member', headers=headers)
             
@@ -112,17 +117,17 @@ def show_login():
                     st.query_params.clear()
                     st.rerun()
                 else:
-                    st.error("🚫 Немає доступу (відсутня роль).")
+                    st.error("🚫 У вас немає потрібної ролі в Discord.")
             else:
-                st.error("❌ Ви не на сервері.")
+                st.error("❌ Ви не є учасником сервера.")
         else:
-            st.error("Помилка токена. Перевірте Redirect URI в Discord Dev Portal.")
+            st.error(f"Помилка Discord API: {r.json().get('error_description', r.text)}")
 
 if 'auth_user' not in st.session_state:
     show_login()
     st.stop()
 
-# --- 5. РОБОЧА ЗОНА ---
+# --- 5. ОСНОВНЕ МЕНЮ (ПІСЛЯ ВХОДУ) ---
 user = st.session_state.auth_user
 reader = st.session_state.reader
 
@@ -141,7 +146,7 @@ if menu == "🚪 Вихід":
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Налаштування зон")
-    f = st.file_uploader("Зразок", type=['jpg', 'png'])
+    f = st.file_uploader("Завантажте зразок", type=['jpg', 'png'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
         target = st.selectbox("Поле", ["Surname", "Name", "ID"])
@@ -150,12 +155,13 @@ elif menu == "⚙️ Налаштування":
             current_coords[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (user['id'], json.dumps(current_coords)))
             conn.commit()
-            st.success("Збережено!")
+            st.success(f"Зону {target} збережено!")
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.warning("Спочатку налаштуйте зони.")
+        st.warning("Спочатку налаштуйте зони у вкладці 'Налаштування'!")
     else:
+        st.header("📸 Сканування")
         files = st.file_uploader("Фото", accept_multiple_files=True)
         if files and st.button("🔍 Розпізнати"):
             res_list = []
@@ -184,7 +190,7 @@ elif menu == "📄 Сканер":
                 requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": msg})
                 cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%d.%m %H:%M")))
                 conn.commit()
-                st.success("Надіслано!")
+                st.success("✅ Надіслано!")
                 del st.session_state.scan_res
 
 elif menu == "📊 Логи":
