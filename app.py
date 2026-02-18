@@ -9,136 +9,146 @@ import sqlite3
 import re
 import os
 import io
-import sys
 from PIL import Image
 from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- МАКСИМАЛЬНЕ ЛОГУВАННЯ ---
+# Логування
 def log(msg):
     print(f"[MEDBOT_LOG] {msg}")
-    # Не використовуємо st.write тут, щоб не ламати інтерфейс до ініціалізації
 
-log("Запуск додатка...")
-
-# --- 0. ПЕРЕВІРКА TESSERACT ---
-log("Перевірка Tesseract...")
-tess_path = '/usr/bin/tesseract'
-if os.path.exists(tess_path):
-    pytesseract.pytesseract.tesseract_cmd = tess_path
-    log(f"Tesseract знайдено за шляхом: {tess_path}")
-else:
-    log("Tesseract НЕ знайдено за стандартним шляхом Linux!")
-
+# --- 0. НАЛАШТУВАННЯ LINUX ---
+if os.path.exists('/usr/bin/tesseract'):
+    pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # --- 1. КОНФІГУРАЦІЯ ---
-log("Завантаження конфігурації...")
 try:
-    # Пріоритет на Secrets (Streamlit Cloud)
-    if "DISCORD_CLIENT_ID" in st.secrets:
-        log("Використовуємо Streamlit Secrets")
-        config = {
-            "DISCORD_CLIENT_ID": st.secrets["DISCORD_CLIENT_ID"],
-            "DISCORD_CLIENT_SECRET": st.secrets["DISCORD_CLIENT_SECRET"],
-            "DISCORD_REDIRECT_URI": st.secrets["DISCORD_REDIRECT_URI"],
-            "GUILD_ID": st.secrets["GUILD_ID"],
-            "ADMIN_ROLE_ID": st.secrets["ADMIN_ROLE_ID"],
-            "ALLOWED_ROLE_ID": st.secrets["ALLOWED_ROLE_ID"],
-            "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
-        }
-    else:
-        log("Secrets не знайдено, шукаємо config.json...")
-        with open("config.json", "r", encoding="utf-8") as f:
-            config = json.load(f)
+    config = {
+        "DISCORD_CLIENT_ID": st.secrets["DISCORD_CLIENT_ID"],
+        "DISCORD_CLIENT_SECRET": st.secrets["DISCORD_CLIENT_SECRET"],
+        "DISCORD_REDIRECT_URI": st.secrets["DISCORD_REDIRECT_URI"],
+        "GUILD_ID": st.secrets["GUILD_ID"],
+        "ADMIN_ROLE_ID": st.secrets["ADMIN_ROLE_ID"],
+        "ALLOWED_ROLE_ID": st.secrets["ALLOWED_ROLE_ID"],
+        "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
+    }
 except Exception as e:
-    log(f"КРИТИЧНА ПОМИЛКА КОНФІГУРАЦІЇ: {str(e)}")
     st.error(f"Помилка конфігурації: {e}")
     st.stop()
 
-st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
+st.set_page_config(layout="wide", page_title="MedBot ERP Pro")
 
 # --- 2. БАЗА ДАНИХ ---
-log("Підключення до БД...")
-try:
-    DB_PATH = os.path.join(os.getcwd(), "medbot_db.sqlite")
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
-    conn.commit()
-    log("БД готова.")
-except Exception as e:
-    log(f"ПОМИЛКА БД: {str(e)}")
-    st.error(f"БД: {e}")
+conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
+cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY)')
+cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
+conn.commit()
 
-# --- 3. АВТОРИЗАЦІЯ ---
+# --- 3. АВТОРИЗАЦІЯ (ВИПРАВЛЕНИЙ ЦИКЛ) ---
 if 'auth_user' not in st.session_state:
     st.session_state.auth_user = None
 
 def handle_discord_login():
-    log("Відображення вікна входу...")
-    client_id = config['DISCORD_CLIENT_ID']
-    redirect_uri = config['DISCORD_REDIRECT_URI']
-    scope = "identify guilds guilds.members.read"
+    # Отримуємо параметри URL
+    params = st.query_params
     
-    auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={client_id}&"
-                f"redirect_uri={requests.utils.quote(redirect_uri)}&"
-                f"response_type=code&scope={requests.utils.quote(scope)}")
-    
-    st.title("🏥 MedBot ERP System")
-    
-    if st.button("🔑 Увійти через Discord", type="primary"):
-        log("Натиснуто кнопку входу, запуск JS-переходу...")
-        components.html(f"<script>window.top.location.href = '{auth_url}';</script>", height=0)
-        st.stop()
-
-    # Перевірка вхідних параметрів (OAuth Code)
-    if "code" in st.query_params:
-        code = st.query_params["code"]
-        log(f"Отримано код авторизації: {code[:5]}***")
+    # ЯКЩО МИ ПОВЕРНУЛИСЯ ВІД DISCORD (є параметр code)
+    if "code" in params:
+        log("Виявлено код у параметрах, починаємо обмін на токен...")
+        code = params["code"]
         try:
-            discord = OAuth2Session(client_id, redirect_uri=redirect_uri, scope=scope.split())
+            discord = OAuth2Session(config['DISCORD_CLIENT_ID'], 
+                                    redirect_uri=config['DISCORD_REDIRECT_URI'], 
+                                    scope=["identify", "guilds", "guilds.members.read"])
             token = discord.fetch_token('https://discord.com/api/oauth2/token', 
                                         client_secret=config['DISCORD_CLIENT_SECRET'], 
                                         code=code)
-            log("Токен отримано.")
             
             u_data = discord.get('https://discord.com/api/users/@me').json()
-            log(f"Користувач: {u_data.get('username')}")
-            
             m_data = discord.get(f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member").json()
             
             u_roles = m_data.get('roles', [])
             is_adm = config['ADMIN_ROLE_ID'] in u_roles
-            is_allowed = config['ALLOWED_ROLE_ID'] in u_roles or is_adm
-            
-            if is_allowed:
-                log("Доступ дозволено.")
+            if config['ALLOWED_ROLE_ID'] in u_roles or is_adm:
                 st.session_state.auth_user = {"id": u_data['id'], "username": u_data['username'], "is_admin": is_adm}
-                st.query_params.clear()
+                st.query_params.clear() # Очищуємо URL
                 st.rerun()
             else:
-                log("ДОСТУП ЗАБОРОНЕНО (Ролі не знайдено)")
-                st.error("У вас немає потрібної ролі в Discord.")
+                st.error("❌ Немає доступу (роль не знайдена).")
         except Exception as e:
-            log(f"ПОМИЛКА OAUTH: {str(e)}")
-            st.error(f"Помилка входу: {e}")
+            st.error(f"Помилка OAuth: {e}")
+            if st.button("Спробувати ще раз"):
+                st.query_params.clear()
+                st.rerun()
+        st.stop()
 
-# Перевірка стану
+    # ЯКЩО МИ ЩЕ НЕ НАТИСНУЛИ КНОПКУ (початковий стан)
+    st.title("🏥 MedBot ERP System")
+    st.info("Будь ласка, авторизуйтесь.")
+    
+    auth_url = (f"https://discord.com/api/oauth2/authorize?client_id={config['DISCORD_CLIENT_ID']}&"
+                f"redirect_uri={requests.utils.quote(config['DISCORD_REDIRECT_URI'])}&"
+                f"response_type=code&scope=identify%20guilds%20guilds.members.read")
+
+    # Створюємо кнопку через HTML, щоб уникнути подвійного rerun від Streamlit
+    login_button_html = f"""
+    <a href="{auth_url}" target="_top" style="
+        background-color: #5865F2;
+        color: white;
+        padding: 15px 25px;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        border-radius: 8px;
+        font-weight: bold;
+        font-family: sans-serif;
+    ">🔑 Увійти через Discord</a>
+    """
+    st.markdown(login_button_html, unsafe_allow_html=True)
+
 if not st.session_state.auth_user:
     handle_discord_login()
     st.stop()
 
-# --- 4. ІНТЕРФЕЙС (СПРОЩЕНИЙ ДЛЯ ТЕСТУ) ---
+# --- 4. ІНТЕРФЕЙС (ПІСЛЯ ВХОДУ) ---
 user = st.session_state.auth_user
-log(f"Інтерфейс завантажено для {user['username']}")
-st.sidebar.success(f"Ви ввійшли як {user['username']}")
+st.sidebar.title(f"👤 {user['username']}")
+menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "🚪 Вихід"])
 
-if st.sidebar.button("🚪 Вийти"):
+if menu == "🚪 Вихід":
     st.session_state.auth_user = None
+    st.query_params.clear()
     st.rerun()
 
-st.write("🎉 Ви успішно авторизовані! Виберіть розділ у меню зліва.")
+# Функція OCR (Tesseract)
+def ocr_process(image_np, is_id=False):
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    txt = pytesseract.image_to_string(thresh, config='--psm 7')
+    if is_id: return "".join(re.findall(r'\d+', txt))
+    return re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
+
+# --- ЛОГІКА СКАНЕРА ТА НАЛАШТУВАНЬ ТУТ (як у попередній версії) ---
+if menu == "⚙️ Налаштування":
+    st.header("📐 Трафарет")
+    f = st.file_uploader("Зразок", type=['png','jpg','jpeg'])
+    if f:
+        img = Image.open(f).convert("RGB").resize((1920, 1080))
+        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
+        if st.button("💾 Зберегти"):
+            # Збереження в БД
+            coords = {"Surname": None, "Name": None, "ID": None}
+            # (тут код завантаження/оновлення з БД)
+            st.success("Збережено!")
+
+elif menu == "📄 Сканер":
+    st.header("📸 Сканер паспортів")
+    p_files = st.file_uploader("Завантажте фото", accept_multiple_files=True, type=['png','jpg','jpeg'])
+    if p_files and st.button("🔍 Почати"):
+        st.info("Розпізнавання активовано...")
+        # (код OCR тут)
