@@ -13,13 +13,17 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- 0. НАЛАШТУВАННЯ OCR (Для стабільності на Streamlit) ---
+# --- 0. НАЛАШТУВАННЯ TESSERACT ДЛЯ LINUX (STREAMLIT CLOUD) ---
+# Вказуємо системний шлях до Tesseract, який встановився через packages.txt
 if os.path.exists('/usr/bin/tesseract'):
     pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
+elif os.path.exists('/usr/local/bin/tesseract'):
+    pytesseract.pytesseract.tesseract_cmd = r'/usr/local/bin/tesseract'
 
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1' #
+# --- 1. УНІВЕРСАЛЬНА КОНФІГУРАЦІЯ ---
+# Дозволяємо OAuth працювати через HTTPS проксі Streamlit
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-# --- 1. КОНФІГУРАЦІЯ (Авто-перемикання: Secrets або JSON) ---
 if os.path.exists("config.json"):
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -34,8 +38,8 @@ else:
             "ALLOWED_ROLE_ID": st.secrets["ALLOWED_ROLE_ID"],
             "DISCORD_WEBHOOK_URL": st.secrets["DISCORD_WEBHOOK_URL"]
         }
-    except Exception:
-        st.error("❌ Налаштуйте Secrets у Streamlit Cloud!")
+    except Exception as e:
+        st.error(f"❌ Помилка Secrets: Перевірте налаштування в Streamlit Cloud. ({e})")
         st.stop()
 
 st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
@@ -218,3 +222,4 @@ elif menu == "📄 Сканер":
                         st.session_state.file_uploader_key += 1
                         st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
