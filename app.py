@@ -14,6 +14,7 @@ from requests_oauthlib import OAuth2Session
 
 # --- 1. ПЕРЕВІРКА ДЛЯ CRON-JOB (KEEP ALIVE) ---
 # Налаштуйте в cron-job.org URL: https://ems-zvit.streamlit.app/?keepalive=1
+# ВАЖЛИВО: App Visibility в Streamlit Cloud має бути PUBLIC
 if st.query_params.get("keepalive") == "1":
     st.write("Server is active")
     st.stop()
@@ -34,7 +35,6 @@ cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
 cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY, user_name TEXT)')
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
-# Додано is_admin в сесії
 cursor.execute('CREATE TABLE IF NOT EXISTS sessions (user_id TEXT PRIMARY KEY, token_data TEXT, expiry TEXT, is_admin INTEGER)')
 conn.commit()
 
@@ -71,26 +71,53 @@ def compress_image(image_file):
 def handle_discord_login():
     code = st.query_params.get("code")
     
-    # Відновлення сесії
+    # 1. Відновлення сесії з ПЕРЕВІРКОЮ актуальних ролей
     if not code and st.session_state.auth_user is None:
         saved = cursor.execute("SELECT user_id, token_data, expiry, is_admin FROM sessions LIMIT 1").fetchone()
         if saved and datetime.now() < datetime.strptime(saved[2], "%Y-%m-%d %H:%M:%S"):
-            if is_blacklisted(saved[0]):
-                st.error("🚫 Ви заблоковані.")
-                st.stop()
-            st.session_state.auth_user = {"id": saved[0], "username": "Співробітник", "is_admin": bool(saved[3])}
-            return
+            try:
+                # Перевіряємо актуальні ролі через Discord API
+                token = json.loads(saved[1])
+                discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], token=token)
+                m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member").json()
+                
+                u_id = m_res.get('user', {}).get('id')
+                u_roles = m_res.get('roles', [])
+                
+                is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
+                is_allowed = st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm
+                
+                # Якщо роль забрали або юзер у бан-листі — видаляємо сесію
+                if not is_allowed or is_blacklisted(u_id):
+                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (saved[0],))
+                    conn.commit()
+                    st.rerun()
 
+                # Оновлюємо дані в пам'яті (включаючи роль адміна)
+                st.session_state.auth_user = {
+                    "id": u_id, 
+                    "username": m_res.get('nick') or m_res.get('user', {}).get('username'), 
+                    "is_admin": is_adm
+                }
+                return
+            except:
+                # Якщо помилка токена — на логін
+                cursor.execute("DELETE FROM sessions")
+                conn.commit()
+                return
+
+    # 2. Якщо немає коду і сесії — показуємо кнопку логіну
     if not code and st.session_state.auth_user is None:
         discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], 
                                 redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], 
-                                scope=["identify", "guilds", "guilds.members.read"])
+                                scope=["identify", "guilds.members.read"])
         auth_url, state = discord.authorization_url("https://discord.com/api/oauth2/authorize")
         st.session_state.oauth_state = state
         st.title("🏥 MedBot ERP System")
         st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
         st.stop()
 
+    # 3. Обробка повернення з Discord
     if code and st.session_state.auth_user is None:
         try:
             discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], 
@@ -106,19 +133,22 @@ def handle_discord_login():
                 st.error("🚫 Доступ заблоковано.")
                 st.stop()
 
-            server_nick = m_res.get('nick') or m_res.get('user', {}).get('global_name') or m_res.get('user', {}).get('username')
             u_roles = m_res.get('roles', [])
             is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
             
             if st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm:
+                server_nick = m_res.get('nick') or m_res.get('user', {}).get('username')
                 st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
                 expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?)", (u_id, json.dumps(token), expiry, 1 if is_adm else 0))
                 conn.commit()
                 st.query_params.clear()
                 st.rerun()
+            else:
+                st.error("Немає потрібної ролі.")
+                st.stop()
         except Exception as e:
-            st.error(f"Помилка: {e}")
+            st.error(f"Помилка авторизації")
             st.stop()
 
 handle_discord_login()
@@ -165,7 +195,12 @@ elif menu == "📊 Адмін-панель":
                     st.rerun()
         with t_users:
             for r in cursor.execute("SELECT user_id, is_admin FROM sessions").fetchall():
-                st.code(f"ID: {r[0]} | Admin: {bool(r[1])}")
+                col1, col2 = st.columns([3, 1])
+                col1.code(f"ID: {r[0]} | Admin: {bool(r[1])}")
+                if col2.button("Видалити", key=f"force_del_{r[0]}"):
+                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (r[0],))
+                    conn.commit()
+                    st.rerun()
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Трафарет")
