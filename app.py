@@ -31,23 +31,23 @@ if 'passport_payload' not in st.session_state:
 conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY, user_name TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS whitelist (user_id TEXT PRIMARY KEY, user_name TEXT)') # Додано для VIP
+cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY, user_name TEXT, reason TEXT)')
+cursor.execute('CREATE TABLE IF NOT EXISTS whitelist (user_id TEXT PRIMARY KEY, user_name TEXT)')
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS sessions (user_id TEXT PRIMARY KEY, token_data TEXT, expiry TEXT, is_admin INTEGER)')
+cursor.execute('CREATE TABLE IF NOT EXISTS sessions (user_id TEXT PRIMARY KEY, user_name TEXT, token_data TEXT, expiry TEXT, is_admin INTEGER)')
 conn.commit()
 
 st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
 
 @st.cache_resource
 def load_ocr():
-    return easyocr.Reader(['en'], gpu=False)
+    return easyocr.Reader(['en', 'uk'], gpu=False)
 reader = load_ocr()
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def is_blacklisted(u_id):
-    res = cursor.execute("SELECT 1 FROM blacklist WHERE user_id = ?", (u_id,)).fetchone()
-    return res is not None
+    res = cursor.execute("SELECT reason FROM blacklist WHERE user_id = ?", (u_id,)).fetchone()
+    return res[0] if res else None
 
 def is_whitelisted(u_id):
     res = cursor.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (u_id,)).fetchone()
@@ -73,28 +73,26 @@ def compress_image(image_file):
 def handle_discord_login():
     code = st.query_params.get("code")
     
+    # Спроба відновити сесію з БД
     if not code and st.session_state.auth_user is None:
-        saved = cursor.execute("SELECT user_id, token_data, expiry, is_admin FROM sessions LIMIT 1").fetchone()
-        if saved and datetime.now() < datetime.strptime(saved[2], "%Y-%m-%d %H:%M:%S"):
-            if is_whitelisted(saved[0]):
-                st.session_state.auth_user = {"id": saved[0], "username": "VIP User", "is_admin": bool(saved[3])}
+        # Шукаємо будь-яку активну сесію (якщо користувач вже заходив)
+        saved = cursor.execute("SELECT user_id, user_name, token_data, expiry, is_admin FROM sessions WHERE expiry > ?", 
+                              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()
+        if saved:
+            u_id = saved[0]
+            if is_blacklisted(u_id):
+                cursor.execute("DELETE FROM sessions WHERE user_id = ?", (u_id,))
+                conn.commit()
                 return
-            try:
-                token = json.loads(saved[1])
-                discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], token=token)
-                m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member").json()
-                u_id = m_res.get('user', {}).get('id')
-                u_roles = m_res.get('roles', [])
-                is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
-                is_allowed = st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm
-                if not is_allowed or is_blacklisted(u_id):
-                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (saved[0],))
-                    conn.commit(); st.rerun()
-                st.session_state.auth_user = {"id": u_id, "username": m_res.get('nick') or m_res.get('user', {}).get('username'), "is_admin": is_adm}
-                return
-            except:
-                cursor.execute("DELETE FROM sessions"); conn.commit(); return
 
+            st.session_state.auth_user = {
+                "id": u_id, 
+                "username": saved[1], 
+                "is_admin": bool(saved[4])
+            }
+            return
+
+    # Початок нової авторизації
     if not code and st.session_state.auth_user is None:
         discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], scope=["identify", "guilds.members.read"])
         auth_url, state = discord.authorization_url("https://discord.com/api/oauth2/authorize")
@@ -103,23 +101,35 @@ def handle_discord_login():
         st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
         st.stop()
 
+    # Обробка коду від Discord
     if code and st.session_state.auth_user is None:
         try:
             discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], state=st.session_state.oauth_state)
             token = discord.fetch_token("https://discord.com/api/oauth2/token", client_secret=st.secrets["DISCORD_CLIENT_SECRET"], code=code)
             m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member").json()
             u_id = m_res.get('user', {}).get('id')
-            if is_blacklisted(u_id): st.error("🚫 Бан"); st.stop()
+            
+            ban_reason = is_blacklisted(u_id)
+            if ban_reason: 
+                st.error(f"🚫 Ви заблоковані. Причина: {ban_reason}")
+                st.stop()
+
             u_roles = m_res.get('roles', [])
             is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
             if st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm or is_whitelisted(u_id):
                 server_nick = m_res.get('nick') or m_res.get('user', {}).get('username')
                 st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
                 expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?)", (u_id, json.dumps(token), expiry, 1 if is_adm else 0))
+                # Зберігаємо сесію з іменем
+                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?, ?)", 
+                               (u_id, server_nick, json.dumps(token), expiry, 1 if is_adm else 0))
                 conn.commit(); st.query_params.clear(); st.rerun()
-            else: st.error("Немає ролі"); st.stop()
-        except: st.error("Помилка авторизації"); st.stop()
+            else: 
+                st.error("У вас немає необхідної ролі в Discord для доступу.")
+                st.stop()
+        except Exception as e: 
+            st.error(f"Помилка авторизації: {e}")
+            st.stop()
 
 handle_discord_login()
 user = st.session_state.auth_user
@@ -132,27 +142,25 @@ else: st.sidebar.caption("🩺 Співробітник")
 
 menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
 
-# --- ІНСТРУКЦІЯ (Додано) ---
 st.sidebar.markdown("---")
 with st.sidebar.expander("❓ Як користуватись?"):
     st.markdown("""
-    **1. Налаштування трафарету** (Робиться один раз):
+    **1. Налаштування трафарету** (Один раз):
     - Перейдіть в `⚙️ Налаштування`.
     - Завантажте фото паспорта.
     - Виберіть зону (Прізвище, Ім'я або ID).
-    - Виділіть потрібний текст рамкою та натисніть `💾 Зберегти`.
-    - Повторіть для всіх трьох полів, поки не з'являться три зелені галочки ✅.
+    - Виділіть текст рамкою та натисніть `💾 Зберегти`.
+    - З'являться зелені галочки ✅.
 
     **2. Робота зі сканером**:
     - Перейдіть в `📄 Сканер`.
-    - Завантажте одне або декілька фото паспортів у поле **"1. Паспорти"**.
+    - Завантажте фото у **"1. Паспорти"**.
     - Натисніть `🔍 Сканувати`.
-    - Перевірте розпізнаний текст у полях, що з'явилися. Якщо OCR помилився — виправте вручну.
+    - Виправте текст, якщо OCR помилився.
 
-    **3. Відправка звіту**:
-    - Після перевірки даних завантажте скріншоти докази оплати у поле **"2. Докази"**.
+    **3. Відправка**:
+    - Додайте скріншоти у **"2. Докази"**.
     - Натисніть `🚀 ВІДПРАВИТИ`.
-    - Звіт автоматично полетить у Discord канал!
     """)
 
 if menu == "🚪 Вихід":
@@ -160,36 +168,62 @@ if menu == "🚪 Вихід":
     conn.commit(); st.session_state.auth_user = None; st.rerun()
 
 elif menu == "📊 Адмін-панель":
-    if not user['is_admin']: st.warning("Немає прав.")
+    if not user.get('is_admin'):
+        st.error("Доступ заборонено. Тільки для адміністраторів.")
     else:
         t_logs, t_ban, t_white, t_users = st.tabs(["📝 Логи", "🚫 Бан-лист", "💎 Білий список", "👥 Сесії"])
+        
         with t_logs:
-            h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
-            st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
+            h = cursor.execute("SELECT user_name, count, timestamp FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
+            st.table([{"Користувач": r[0], "Кількість": r[1], "Дата": r[2]} for r in h])
+        
         with t_ban:
-            bid = st.text_input("Discord ID")
-            if st.button("Забанити"):
-                cursor.execute("REPLACE INTO blacklist VALUES (?, 'Banned')", (bid,))
-                cursor.execute("DELETE FROM sessions WHERE user_id = ?", (bid,))
-                conn.commit(); st.rerun()
-            for b in cursor.execute("SELECT * FROM blacklist").fetchall():
-                if st.button(f"Розбан {b[0]}", key=f"u_{b[0]}"):
-                    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (b[0],)); conn.commit(); st.rerun()
+            c1, c2 = st.columns(2)
+            bid = c1.text_input("Discord ID для бану")
+            breason = c2.text_input("Причина бану")
+            if st.button("🚫 Виконати бан"):
+                if bid:
+                    cursor.execute("REPLACE INTO blacklist VALUES (?, 'Banned', ?)", (bid, breason or "Не вказана"))
+                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (bid,))
+                    conn.commit(); st.success(f"Користувача {bid} забанено"); st.rerun()
+
+            st.write("### Забанені користувачі")
+            blacklist_data = cursor.execute("SELECT user_id, reason FROM blacklist").fetchall()
+            for b_id, b_reason in blacklist_data:
+                col_a, col_b = st.columns([3, 1])
+                col_a.write(f"🆔 `{b_id}` | 📝 Причина: *{b_reason}*")
+                if col_b.button("Розбан", key=f"unban_{b_id}"):
+                    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (b_id,))
+                    conn.commit(); st.rerun()
+
         with t_white:
-            wid = st.text_input("Discord ID для VIP")
-            wname = st.text_input("Примітка")
-            if st.button("Додати в Білий список"):
-                cursor.execute("REPLACE INTO whitelist VALUES (?, ?)", (wid, wname))
-                conn.commit(); st.rerun()
-            for w in cursor.execute("SELECT * FROM whitelist").fetchall():
-                if st.button(f"Видалити VIP {w[0]}", key=f"w_{w[0]}"):
-                    cursor.execute("DELETE FROM whitelist WHERE user_id = ?", (w[0],)); conn.commit(); st.rerun()
+            c1, c2 = st.columns(2)
+            wid = c1.text_input("Discord ID для VIP")
+            wname = c2.text_input("Примітка (Нік/Ім'я)")
+            if st.button("➕ Додати в Білий список"):
+                if wid:
+                    cursor.execute("REPLACE INTO whitelist VALUES (?, ?)", (wid, wname or "No Name"))
+                    conn.commit(); st.success("Додано!"); st.rerun()
+            
+            st.write("### Список VIP")
+            whitelist_data = cursor.execute("SELECT user_id, user_name FROM whitelist").fetchall()
+            for w_id, w_note in whitelist_data:
+                col_a, col_b = st.columns([3, 1])
+                col_a.write(f"💎 `{w_id}` | 🏷 {w_note}")
+                if col_b.button("Видалити", key=f"delw_{w_id}"):
+                    cursor.execute("DELETE FROM whitelist WHERE user_id = ?", (w_id,))
+                    conn.commit(); st.rerun()
+
         with t_users:
-            for r in cursor.execute("SELECT user_id, is_admin FROM sessions").fetchall():
-                c1, c2 = st.columns([3, 1])
-                c1.code(f"ID: {r[0]} | Admin: {bool(r[1])}")
-                if c2.button("Видалити", key=f"f_{r[0]}"):
-                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (r[0],)); conn.commit(); st.rerun()
+            st.write("### Активні сесії (всі авторизовані)")
+            sessions_data = cursor.execute("SELECT user_id, user_name, expiry, is_admin FROM sessions").fetchall()
+            for s_id, s_name, s_exp, s_adm in sessions_data:
+                col_a, col_b = st.columns([3, 1])
+                role_label = "👑 Адмін" if s_adm else "🩺 Юзер"
+                col_a.code(f"{role_label} | {s_name} | ID: {s_id} | Дійсна до: {s_exp}")
+                if col_b.button("Завершити", key=f"killsess_{s_id}"):
+                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (s_id,))
+                    conn.commit(); st.rerun()
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Трафарет")
@@ -201,34 +235,40 @@ elif menu == "⚙️ Налаштування":
     if st.button("🗑 Скинути все"):
         save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None}); st.rerun()
 
-    f = st.file_uploader("Завантажте фото", type=['png','jpg','jpeg'])
+    f = st.file_uploader("Завантажте фото для налаштування", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        target = st.selectbox("Виберіть зону для налаштування", ["Surname", "Name", "ID"])
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button("💾 Зберегти"):
+        if st.button("💾 Зберегти цю зону"):
             new_c = current_coords
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
-            save_user_coords(user['id'], new_c); st.rerun()
+            save_user_coords(user['id'], new_c); st.success(f"Зону {target} збережено!"); time.sleep(1); st.rerun()
 
 elif menu == "📄 Сканер":
-    if not all(current_coords.values()): st.error("Налаштуйте трафарет!")
+    if not all(current_coords.values()): 
+        st.error("⚠️ Ви ще не налаштували трафарет. Перейдіть в 'Налаштування'.")
     else:
-        p_files = st.file_uploader("1. Паспорти", accept_multiple_files=True)
-        if p_files and st.button("🔍 Сканувати"):
+        p_files = st.file_uploader("1. Завантажте фото паспортів", accept_multiple_files=True)
+        if p_files and st.button("🔍 Почати сканування"):
             st.session_state.scanned_data, st.session_state.passport_payload = [], []
-            for i, f in enumerate(p_files):
-                img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                res = {}
-                for lbl, (x, y, w, h) in current_coords.items():
-                    crop = img_np[int(y):int(y+h), int(x):int(x+w)]
-                    txt = " ".join([t[1] for t in reader.readtext(crop)])
-                    res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
-                st.session_state.scanned_data.append(res)
-                st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", compress_image(f).read(), "image/jpeg")))
+            with st.spinner("OCR працює..."):
+                for i, f in enumerate(p_files):
+                    img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
+                    res = {}
+                    for lbl, (x, y, w, h) in current_coords.items():
+                        crop = img_np[int(y):int(y+h), int(x):int(x+w)]
+                        txt = " ".join([t[1] for t in reader.readtext(crop)])
+                        if lbl == "ID":
+                            res[lbl] = "".join(re.findall(r'\d+', txt))
+                        else:
+                            res[lbl] = re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
+                    st.session_state.scanned_data.append(res)
+                    st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", compress_image(f).read(), "image/jpeg")))
             st.rerun()
 
         if st.session_state.get('scanned_data'):
+            st.write("### Перевірка даних")
             final = []
             for idx, item in enumerate(st.session_state.scanned_data):
                 cols = st.columns([3, 3, 2])
@@ -236,16 +276,25 @@ elif menu == "📄 Сканер":
                 n = cols[1].text_input(f"Ім'я #{idx+1}", item['Name'], key=f"n_{idx}")
                 u = cols[2].text_input(f"ID #{idx+1}", item['ID'], key=f"u_{idx}")
                 final.append({"Surname": s, "Name": n, "ID": u})
-            c_files = st.file_uploader("2. Докази", accept_multiple_files=True)
-            if st.button("🚀 ВІДПРАВИТИ"):
-                if not c_files: st.error("Додайте докази!")
+            
+            c_files = st.file_uploader("2. Додайте скріншоти доказів", accept_multiple_files=True)
+            if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
+                if not c_files: 
+                    st.error("Будь ласка, додайте докази (скріншоти).")
                 else:
-                    msg = f"🏥 **ЗВІТ**\n<@{user['id']}> | {user['username']}\nК-сть: {len(final)}\n\n" + "\n".join([f"• {r['Surname']} {r['Name']} #{r['ID']}" for r in final])
+                    msg = f"🏥 **НОВИЙ ЗВІТ ЕМС**\n**Співробітник:** <@{user['id']}>\n**Кількість:** {len(final)}\n\n" + \
+                          "\n".join([f"• {r['Surname']} {r['Name']} [ID: {r['ID']}]" for r in final])
                     try:
+                        # Відправка паспортів
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": msg}, files=st.session_state.passport_payload)
+                        # Відправка доказів
                         c_pay = [(f"c{i}", (f"c_{i}.jpg", compress_image(cf).read(), "image/jpeg")) for i, cf in enumerate(c_files)]
-                        requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази:**"}, files=c_pay)
+                        requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Скріншоти доказів:**"}, files=c_pay)
+                        
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
-                        conn.commit(); st.success("✅ Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
-                    except Exception as e: st.error(f"Помилка: {e}")
-
+                        conn.commit()
+                        st.success("✅ Звіт успішно надіслано в Discord!")
+                        st.session_state.scanned_data = []
+                        time.sleep(3); st.rerun()
+                    except Exception as e: 
+                        st.error(f"Помилка при відправці: {e}")
