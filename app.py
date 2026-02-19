@@ -88,43 +88,100 @@ def compress_image(image_file):
 
 # --- АВТОРИЗАЦІЯ ---
 def handle_discord_login():
+    # 1. Якщо користувач натиснув "Вийти", або ми хочемо скинути сесію через помилку
+    if st.query_params.get("reset") == "1":
+        st.session_state.auth_user = None
+        st.session_state.oauth_state = None
+        st.query_params.clear()
+        st.rerun()
+
     code = st.query_params.get("code")
     
-    # Спроба знайти сесію користувача у базі (тільки якщо в st.session_state ще порожньо)
-    if not code and st.session_state.auth_user is None:
-        # Тут ми нічого не робимо автоматично, користувач має натиснути "Увійти" 
-        # або Streamlit сам тримає сесію в межах одного браузера.
-        pass
+    # 2. Якщо користувач вже авторизований у цій вкладці — просто працюємо
+    if st.session_state.get('auth_user'):
+        return
 
-    if not code and st.session_state.auth_user is None:
-        discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], scope=["identify", "guilds.members.read"])
+    # 3. Якщо немає коду і юзер не в системі — показуємо кнопку входу
+    if not code:
+        discord = OAuth2Session(
+            st.secrets["DISCORD_CLIENT_ID"], 
+            redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], 
+            scope=["identify", "guilds.members.read"]
+        )
         auth_url, state = discord.authorization_url("https://discord.com/api/oauth2/authorize")
         st.session_state.oauth_state = state
+        
         st.title("🏥 MedBot ERP System")
+        st.info("Будь ласка, авторизуйтесь для доступу до системи.")
         st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
+        
+        # Кнопка для повного скидання, якщо щось застрягло
+        if st.button("🔄 Очистити сесію (якщо виникає помилка)"):
+            st.query_params.update(reset="1")
+            st.rerun()
         st.stop()
 
-    if code and st.session_state.auth_user is None:
+    # 4. Обробка повернення від Discord
+    if code:
         try:
-            discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], state=st.session_state.oauth_state)
-            token = discord.fetch_token("https://discord.com/api/oauth2/token", client_secret=st.secrets["DISCORD_CLIENT_SECRET"], code=code)
-            m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member").json()
-            u_id = m_res.get('user', {}).get('id')
+            discord = OAuth2Session(
+                st.secrets["DISCORD_CLIENT_ID"], 
+                redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], 
+                state=st.session_state.get('oauth_state')
+            )
+            token = discord.fetch_token(
+                "https://discord.com/api/oauth2/token", 
+                client_secret=st.secrets["DISCORD_CLIENT_SECRET"], 
+                code=code
+            )
             
+            # Отримуємо дані про членство на сервері
+            m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member").json()
+            
+            # Перевірка на помилку від API Discord
+            if "user" not in m_res:
+                st.error("Помилка: Ви не є учасником потрібного Discord сервера.")
+                if st.button("Спробувати знову"):
+                    st.query_params.update(reset="1")
+                    st.rerun()
+                st.stop()
+
+            u_id = m_res['user']['id']
+            
+            # Перевірка бану
             ban_reason = is_blacklisted(u_id)
             if ban_reason: 
-                st.error(f"🚫 Бан: {ban_reason}"); st.stop()
+                st.error(f"🚫 Доступ заблоковано: {ban_reason}")
+                st.stop()
 
+            # Перевірка ролей
             u_roles = m_res.get('roles', [])
             is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
-            if st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm or is_whitelisted(u_id):
-                server_nick = m_res.get('nick') or m_res.get('user', {}).get('username')
+            is_allowed = st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm or is_whitelisted(u_id)
+
+            if is_allowed:
+                server_nick = m_res.get('nick') or m_res['user'].get('username')
                 st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
+                
+                # Оновлюємо сесію в БД
                 expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?, ?)", (u_id, server_nick, json.dumps(token), expiry, 1 if is_adm else 0))
-                conn.commit(); st.query_params.clear(); st.rerun()
-            else: st.error("Немає доступу"); st.stop()
-        except: st.error("Помилка авторизації"); st.stop()
+                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?, ?)", 
+                               (u_id, server_nick, json.dumps(token), expiry, 1 if is_adm else 0))
+                conn.commit()
+                
+                # Очищаємо URL від коду Discord
+                st.query_params.clear()
+                st.rerun()
+            else:
+                st.error("У вас немає відповідної ролі в Discord.")
+                st.stop()
+                
+        except Exception as e:
+            st.error(f"Критична помилка авторизації. Можливо, посилання застаріло.")
+            if st.button("🔄 Скинути і почати заново"):
+                st.query_params.update(reset="1")
+                st.rerun()
+            st.stop()
 
 handle_discord_login()
 user = st.session_state.auth_user
@@ -252,3 +309,4 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
