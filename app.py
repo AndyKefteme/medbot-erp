@@ -278,23 +278,37 @@ elif menu == "📄 Сканер":
                 final.append({"Surname": s, "Name": n, "ID": u})
             
             c_files = st.file_uploader("2. Додайте скріншоти доказів", accept_multiple_files=True)
+            Ось конкретний блок коду з розділу elif menu == "📄 Сканер":, який відповідає за формування повідомлення та відправку в Discord. Замініть його у своєму файлі:
+
+Python
             if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
                 if not c_files: 
                     st.error("Будь ласка, додайте докази (скріншоти).")
                 else:
-                    msg = f"🏥 **НОВИЙ ЗВІТ ЕМС**\n**Співробітник:** <@{user['id']}>\n**Кількість:** {len(final)}\n\n" + \
+                    # Форматування імені користувача згідно з вашим запитом
+                    user_mention = f"<@{user['id']}>"
+                    server_nick = user['username']
+                    user_info_report = f"{user_mention} | {server_nick}"
+                    
+                    # Формування тексту звіту
+                    msg = f"🏥 **НОВИЙ ЗВІТ ЕМС**\n**Співробітник:** {user_info_report}\n**Кількість:** {len(final)}\n\n" + \
                           "\n".join([f"• {r['Surname']} {r['Name']} [ID: {r['ID']}]" for r in final])
+                    
                     try:
-                        # Відправка паспортів
+                        # 1. Відправка основного тексту та фото паспортів
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": msg}, files=st.session_state.passport_payload)
-                        # Відправка доказів
+                        
+                        # 2. Відправка скріншотів доказів
                         c_pay = [(f"c{i}", (f"c_{i}.jpg", compress_image(cf).read(), "image/jpeg")) for i, cf in enumerate(c_files)]
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Скріншоти доказів:**"}, files=c_pay)
                         
+                        # 3. Запис у базу даних (логи)
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit()
+                        
                         st.success("✅ Звіт успішно надіслано в Discord!")
                         st.session_state.scanned_data = []
-                        time.sleep(3); st.rerun()
+                        time.sleep(3)
+                        st.rerun()
                     except Exception as e: 
                         st.error(f"Помилка при відправці: {e}")
