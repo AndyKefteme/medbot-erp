@@ -1,5 +1,4 @@
 import streamlit as st
-import cv2
 import numpy as np
 import easyocr
 import requests
@@ -13,9 +12,7 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- НАЛАШТУВАННЯ ---
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-
+# --- КОНФІГУРАЦІЯ ---
 try:
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -39,13 +36,12 @@ def load_ocr():
 
 reader = load_ocr()
 
-# --- ФУНКЦІЇ ---
+# --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def save_user_coords(u_id, coords):
     cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (u_id, json.dumps(coords)))
     conn.commit()
 
 def load_user_coords(u_id):
-    if not u_id: return {"Surname": None, "Name": None, "ID": None}
     saved = cursor.execute("SELECT coords_json FROM user_coords WHERE user_id = ?", (u_id,)).fetchone()
     if saved: return json.loads(saved[0])
     return {"Surname": None, "Name": None, "ID": None}
@@ -60,49 +56,53 @@ def compress_image(image_file):
 # --- СТАН СЕСІЇ ---
 if 'auth_user' not in st.session_state:
     st.session_state.auth_user = None
+if 'oauth_state' not in st.session_state:
+    st.session_state.oauth_state = None
+if 'scanned_data' not in st.session_state:
+    st.session_state.scanned_data = []
 
-# --- АВТОРИЗАЦІЯ (ВИПРАВЛЕНИЙ ПЕРЕХІД) ---
+# --- АВТОРИЗАЦІЯ DISCORD (ВИПРАВЛЕНО) ---
 def handle_discord_login():
-    # Твоє пряме посилання
-    auth_url = "https://discord.com/api/oauth2/authorize?response_type=code&client_id=1473419565978615929&redirect_uri=https%3A%2F%2Fems-zvit.streamlit.app&scope=identify+guilds+guilds.members.read&state=edKLeYvUD7lV7nbkhdvRKfNAxcWKpZ"
-    
-    qp = st.query_params
-    
-    # Якщо користувач не авторизований і в URL немає коду
-    if "code" not in qp and st.session_state.auth_user is None:
-        st.title("🏥 MedBot ERP System")
-        st.markdown("### Необхідна авторизація")
+    # 1. Отримуємо код з URL за новим API
+    code = st.query_params.get("code")
+
+    # 2. Якщо коду немає і юзер не в системі — створюємо посилання
+    if not code and st.session_state.auth_user is None:
+        discord = OAuth2Session(
+            config['DISCORD_CLIENT_ID'],
+            redirect_uri=config['DISCORD_REDIRECT_URI'],
+            scope=["identify", "guilds", "guilds.members.read"]
+        )
+        auth_url, state = discord.authorization_url("https://discord.com/api/oauth2/authorize")
         
-        # ВИРІШАЛЬНИЙ МОМЕНТ: target="_top" виводить посилання ЗА МЕЖІ фрейму Streamlit
-        st.markdown(f"""
-            <div style="text-align: center; margin-top: 50px;">
-                <p style="font-size: 1.2rem;">Натисніть кнопку нижче, щоб увійти через Discord:</p>
-                <a href="{auth_url}" target="_top" style="
-                    background-color: #5865F2;
-                    color: white;
-                    padding: 18px 40px;
-                    text-decoration: none;
-                    border-radius: 10px;
-                    font-weight: bold;
-                    font-size: 20px;
-                    display: inline-block;
-                    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-                ">🔑 УВІЙТИ В СИСТЕМУ</a>
-            </div>
-        """, unsafe_allow_html=True)
+        # Зберігаємо state для перевірки при поверненні
+        st.session_state.oauth_state = state
+        
+        st.title("🏥 MedBot ERP System")
+        st.write("Для початку роботи необхідно авторизуватися:")
+        
+        # Використовуємо офіційну кнопку Streamlit для зовнішніх посилань
+        st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
         st.stop()
-    
-    # Якщо код прийшов у параметрах
-    if "code" in qp and st.session_state.auth_user is None:
+
+    # 3. Якщо код повернувся — обмінюємо його на токен
+    if code and st.session_state.auth_user is None:
         try:
-            discord = OAuth2Session(config['DISCORD_CLIENT_ID'], redirect_uri=config['DISCORD_REDIRECT_URI'])
-            token = discord.fetch_token('https://discord.com/api/oauth2/token', 
-                                        client_secret=config['DISCORD_CLIENT_SECRET'], 
-                                        code=qp['code'])
+            discord = OAuth2Session(
+                config['DISCORD_CLIENT_ID'],
+                redirect_uri=config['DISCORD_REDIRECT_URI'],
+                state=st.session_state.oauth_state
+            )
             
-            u_data = discord.get('https://discord.com/api/users/@me').json()
+            token = discord.fetch_token(
+                "https://discord.com/api/oauth2/token",
+                client_secret=config['DISCORD_CLIENT_SECRET'],
+                code=code
+            )
             
-            # Перевірка ролей
+            user_data = discord.get("https://discord.com/api/users/@me").json()
+            
+            # Перевірка ролей на сервері
             m_url = f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member"
             m_res = discord.get(m_url)
             
@@ -113,23 +113,31 @@ def handle_discord_login():
                 is_allowed = config['ALLOWED_ROLE_ID'] in u_roles or is_adm
                 
                 if is_allowed:
-                    st.session_state.auth_user = {"id": u_data['id'], "username": u_data['username'], "is_admin": is_adm}
+                    st.session_state.auth_user = {
+                        "id": user_data["id"], 
+                        "username": user_data["username"], 
+                        "is_admin": is_adm
+                    }
                     st.query_params.clear()
                     st.rerun()
                 else:
-                    st.error("🚫 Доступ заборонено (відсутня роль).")
+                    st.error("🚫 Доступ заборонено: у вас немає потрібної ролі.")
                     st.stop()
             else:
                 st.error("❌ Ви не є учасником Discord сервера.")
                 st.stop()
+                
         except Exception as e:
-            st.error(f"Помилка авторизації: {e}")
+            st.error(f"Помилка OAuth: {e}")
+            if st.button("Спробувати ще раз"):
+                st.query_params.clear()
+                st.rerun()
             st.stop()
 
-# Старт логіки
+# Запуск логіки входу
 handle_discord_login()
 
-# --- ОСНОВНИЙ КОД (ПІСЛЯ ВХОДУ) ---
+# --- ОСНОВНИЙ ІНТЕРФЕЙС (ЯКИЙ ТИ СТВОРИВ) ---
 user = st.session_state.auth_user
 current_coords = load_user_coords(user['id'])
 
@@ -140,49 +148,66 @@ if menu == "🚪 Вихід":
     st.session_state.auth_user = None
     st.rerun()
 
+elif menu == "📊 Адмін-панель":
+    if not user['is_admin']:
+        st.warning("Доступ заборонено.")
+    else:
+        st.header("🛡 Управління")
+        t_logs, t_ban = st.tabs(["📝 Логи", "🚫 Бан"])
+        with t_logs:
+            h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
+            st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
+        with t_ban:
+            bid = st.text_input("Discord ID для бану")
+            if st.button("🚫 Бан"):
+                cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
+                conn.commit()
+                st.rerun()
+
 elif menu == "⚙️ Налаштування":
     st.header("📐 Налаштування трафарету")
-    f = st.file_uploader("Завантажте зразок", type=['png','jpg','jpeg'])
+    f = st.file_uploader("Завантажте зразок паспорта", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        target = st.selectbox("Оберіть поле для виділення", ["Surname", "Name", "ID"])
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button("💾 Зберегти"):
+        if st.button("💾 Зберегти зону"):
             new_c = current_coords
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             save_user_coords(user['id'], new_c)
-            st.success("Збережено!")
+            st.success(f"Зону {target} збережено!")
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.warning("⚠️ Налаштуйте координати в 'Налаштуваннях'!")
+        st.warning("⚠️ Спочатку налаштуйте зони в 'Налаштуваннях'!")
     else:
-        st.header("📸 Новий звіт")
-        p_files = st.file_uploader("Завантажте паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
-        if p_files and st.button("🔍 Розпізнати"):
-            scanned = []
+        st.header("📸 Сканування документів")
+        p_files = st.file_uploader("Паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
+        if p_files and st.button("🔍 Почати OCR"):
+            results = []
             for f in p_files:
                 img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                res = {}
+                item_data = {}
                 for lbl, (x, y, w, h) in current_coords.items():
                     crop = img_np[int(y):int(y+h), int(x):int(x+w)]
                     txt = " ".join([t[1] for t in reader.readtext(crop)])
-                    res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else txt.strip().capitalize()
-                scanned.append(res)
-            st.session_state.scanned_data = scanned
+                    item_data[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else txt.strip().capitalize()
+                results.append(item_data)
+            st.session_state.scanned_data = results
             st.rerun()
 
-        if st.get('scanned_data' in st.session_state and st.session_state.scanned_data):
-            final = []
+        if st.session_state.scanned_data:
+            st.subheader("📝 Перевірка та відправка")
+            final_list = []
             for idx, item in enumerate(st.session_state.scanned_data):
-                cols = st.columns(3)
-                s = cols[0].text_input(f"Прізвище #{idx}", item['Surname'], key=f"s{idx}")
-                n = cols[1].text_input(f"Ім'я #{idx}", item['Name'], key=f"n{idx}")
-                u = cols[2].text_input(f"ID #{idx}", item['ID'], key=f"u{idx}")
-                final.append({"Surname": s, "Name": n, "ID": u})
+                c1, c2, c3 = st.columns(3)
+                s = c1.text_input(f"Прізвище #{idx}", item['Surname'], key=f"s{idx}")
+                n = c2.text_input(f"Ім'я #{idx}", item['Name'], key=f"n{idx}")
+                u = c3.text_input(f"ID #{idx}", item['ID'], key=f"u{idx}")
+                final_list.append({"Surname": s, "Name": n, "ID": u})
             
-            if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
-                msg = f"🏥 **ЗВІТ** від <@{user['id']}>\n" + "\n".join([f"• {r['Surname']} {r['Name']} #{r['ID']}" for r in final])
+            if st.button("🚀 ВІДПРАВИТИ В DISCORD"):
+                msg = f"🏥 **Новий звіт** від <@{user['id']}>\n" + "\n".join([f"• {r['Surname']} {r['Name']} (ID: {r['ID']})" for r in final_list])
                 requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": msg})
-                st.success("Надіслано!")
+                st.success("Звіт надіслано!")
                 st.session_state.scanned_data = []
