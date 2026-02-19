@@ -76,7 +76,6 @@ def handle_discord_login():
     if not code and st.session_state.auth_user is None:
         saved = cursor.execute("SELECT user_id, token_data, expiry, is_admin FROM sessions LIMIT 1").fetchone()
         if saved and datetime.now() < datetime.strptime(saved[2], "%Y-%m-%d %H:%M:%S"):
-            # Перевірка Білого списку
             if is_whitelisted(saved[0]):
                 st.session_state.auth_user = {"id": saved[0], "username": "VIP User", "is_admin": bool(saved[3])}
                 return
@@ -133,6 +132,29 @@ else: st.sidebar.caption("🩺 Співробітник")
 
 menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
 
+# --- ІНСТРУКЦІЯ (Додано) ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("❓ Як користуватись?"):
+    st.markdown("""
+    **1. Налаштування трафарету** (Робиться один раз):
+    - Перейдіть в `⚙️ Налаштування`.
+    - Завантажте фото паспорта.
+    - Виберіть зону (Прізвище, Ім'я або ID).
+    - Виділіть потрібний текст рамкою та натисніть `💾 Зберегти`.
+    - Повторіть для всіх трьох полів, поки не з'являться три зелені галочки ✅.
+
+    **2. Робота зі сканером**:
+    - Перейдіть в `📄 Сканер`.
+    - Завантажте одне або декілька фото паспортів у поле **"1. Паспорти"**.
+    - Натисніть `🔍 Сканувати`.
+    - Перевірте розпізнаний текст у полях, що з'явилися. Якщо OCR помилився — виправте вручну.
+
+    **3. Відправка звіту**:
+    - Після перевірки даних завантажте скріншоти видачі/лікування у поле **"2. Докази"**.
+    - Натисніть `🚀 ВІДПРАВИТИ`.
+    - Звіт автоматично полетить у Discord канал!
+    """)
+
 if menu == "🚪 Вихід":
     cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user['id'],))
     conn.commit(); st.session_state.auth_user = None; st.rerun()
@@ -171,7 +193,6 @@ elif menu == "📊 Адмін-панель":
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Трафарет")
-    # ТВОЯ ПЕРЕВІРКА ЗОН (✅/❌)
     c1, c2, c3 = st.columns(3)
     c1.write(f"Прізвище: {'✅' if current_coords['Surname'] else '❌'}")
     c2.write(f"Ім'я: {'✅' if current_coords['Name'] else '❌'}")
