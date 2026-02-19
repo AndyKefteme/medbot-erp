@@ -259,9 +259,16 @@ elif menu == "⚙️ Налаштування":
         target = st.selectbox("Зона", ["Surname", "Name", "ID"])
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
         if st.button("💾 Зберегти"):
-            new_c = current_coords
+            # Робимо реальну копію словника, щоб уникнути помилок посилань
+            new_c = current_coords.copy() 
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
-            save_user_coords(user['id'], new_c); st.success("Збережено!"); time.sleep(1); st.rerun()
+            
+            # Зберігаємо в базу
+            save_user_coords(user['id'], new_c)
+            
+            st.success(f"✅ Зона {target} збережена!")
+            time.sleep(1)
+            st.rerun()
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()): 
@@ -309,4 +316,5 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
 
