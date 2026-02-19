@@ -137,11 +137,11 @@ def handle_discord_login():
 # Запуск логіки входу
 handle_discord_login()
 
-# --- ОСНОВНИЙ ІНТЕРФЕЙС (ЯКИЙ ТИ СТВОРИВ) ---
-user = st.session_state.auth_user
-current_coords = load_user_coords(user['id'])
-
+# --- МЕНЮ ---
 st.sidebar.title(f"👤 {user['username']}")
+if user['is_admin']: st.sidebar.subheader("👑 Адміністратор")
+else: st.sidebar.caption("🩺 Співробітник")
+
 menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
 
 if menu == "🚪 Вихід":
@@ -158,56 +158,89 @@ elif menu == "📊 Адмін-панель":
             h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
             st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
         with t_ban:
-            bid = st.text_input("Discord ID для бану")
-            if st.button("🚫 Бан"):
-                cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
-                conn.commit()
-                st.rerun()
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                bid = st.text_input("Discord ID")
+                if st.button("🚫 Бан"):
+                    cursor.execute("INSERT OR IGNORE INTO blacklist VALUES (?)", (bid,))
+                    conn.commit()
+                    st.rerun()
+            with c2:
+                st.subheader("Список")
+                for r in cursor.execute("SELECT user_id FROM blacklist").fetchall():
+                    bc1, bc2 = st.columns([3, 1])
+                    bc1.code(r[0])
+                    if bc2.button("🗑", key=f"u_{r[0]}"):
+                        cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (r[0],))
+                        conn.commit()
+                        st.rerun()
 
 elif menu == "⚙️ Налаштування":
-    st.header("📐 Налаштування трафарету")
-    f = st.file_uploader("Завантажте зразок паспорта", type=['png','jpg','jpeg'])
+    st.header("📐 Трафарет")
+    if st.button("🗑 Очистити координати"):
+        save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None})
+        st.rerun()
+    f = st.file_uploader("Завантажте зразок", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Оберіть поле для виділення", ["Surname", "Name", "ID"])
+        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button("💾 Зберегти зону"):
+        if st.button("💾 Зберегти"):
             new_c = current_coords
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             save_user_coords(user['id'], new_c)
-            st.success(f"Зону {target} збережено!")
+            st.rerun()
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.warning("⚠️ Спочатку налаштуйте зони в 'Налаштуваннях'!")
+        st.warning("⚠️ Налаштуйте координати!")
     else:
-        st.header("📸 Сканування документів")
-        p_files = st.file_uploader("Паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
-        if p_files and st.button("🔍 Почати OCR"):
-            results = []
-            for f in p_files:
-                img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                item_data = {}
+        st.header("📸 Новий звіт")
+        p_files = st.file_uploader("1. Паспорти (макс. 10)", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"p_{st.session_state.file_uploader_key}")
+        if p_files and st.button("🔍 Розпізнати"):
+            st.session_state.scanned_data = []
+            st.session_state.passport_payload = []
+            for i, f in enumerate(p_files):
+                img_pil = Image.open(f).convert("RGB").resize((1920, 1080))
+                img_np = np.array(img_pil)
+                res = {}
                 for lbl, (x, y, w, h) in current_coords.items():
                     crop = img_np[int(y):int(y+h), int(x):int(x+w)]
                     txt = " ".join([t[1] for t in reader.readtext(crop)])
-                    item_data[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else txt.strip().capitalize()
-                results.append(item_data)
-            st.session_state.scanned_data = results
+                    res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else re.sub(r'[^a-zA-Z]', '', txt).capitalize()
+                st.session_state.scanned_data.append(res)
+                buf = compress_image(f)
+                st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", buf.read(), "image/jpeg")))
             st.rerun()
 
         if st.session_state.scanned_data:
-            st.subheader("📝 Перевірка та відправка")
-            final_list = []
+            st.subheader("📝 Перевірка")
+            final = []
             for idx, item in enumerate(st.session_state.scanned_data):
-                c1, c2, c3 = st.columns(3)
-                s = c1.text_input(f"Прізвище #{idx}", item['Surname'], key=f"s{idx}")
-                n = c2.text_input(f"Ім'я #{idx}", item['Name'], key=f"n{idx}")
-                u = c3.text_input(f"ID #{idx}", item['ID'], key=f"u{idx}")
-                final_list.append({"Surname": s, "Name": n, "ID": u})
+                cols = st.columns([3, 3, 2])
+                s = cols[0].text_input(f"Прізвище #{idx+1}", item['Surname'], key=f"s_{idx}")
+                n = cols[1].text_input(f"Ім'я #{idx+1}", item['Name'], key=f"n_{idx}")
+                u = cols[2].text_input(f"ID #{idx+1}", item['ID'], key=f"u_{idx}")
+                final.append({"Surname": s, "Name": n, "ID": u})
             
-            if st.button("🚀 ВІДПРАВИТИ В DISCORD"):
-                msg = f"🏥 **Новий звіт** від <@{user['id']}>\n" + "\n".join([f"• {r['Surname']} {r['Name']} (ID: {r['ID']})" for r in final_list])
-                requests.post(config['DISCORD_WEBHOOK_URL'], json={"content": msg})
-                st.success("Звіт надіслано!")
-                st.session_state.scanned_data = []
+            c_files = st.file_uploader("2. Докази розрахунку", accept_multiple_files=True, type=['png','jpg','jpeg'], key=f"c_{st.session_state.file_uploader_key}")
+            if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
+                if not c_files: st.error("Додайте докази!")
+                else:
+                    msg = f"🏥 **ЗВІТ**\n<@{user['id']}> | {user['username']}\nК-сть: {len(final)}\n\n" + \
+                          "\n".join([f"{r['Surname']} {r['Name']} #{r['ID']}" for r in final])
+                    try:
+                        requests.post(config['DISCORD_WEBHOOK_URL'], data={"content": msg}, files=st.session_state.passport_payload)
+                        c_pay = []
+                        for i, cf in enumerate(c_files):
+                            c_buf = compress_image(cf)
+                            c_pay.append((f"c{i}", (f"c_{i}.jpg", c_buf.read(), "image/jpeg")))
+                        requests.post(config['DISCORD_WEBHOOK_URL'], data={"content": "💳 **Докази:**"}, files=c_pay)
+                        cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        conn.commit()
+                        st.success("✅ Надіслано!")
+                        st.session_state.scanned_data = []
+                        st.session_state.file_uploader_key += 1
+                        st.rerun()
+                    except Exception as e: st.error(f"Помилка: {e}")
+
