@@ -150,7 +150,7 @@ with st.sidebar.expander("❓ Як користуватись?"):
     - Перевірте розпізнаний текст у полях, що з'явилися. Якщо OCR помилився — виправте вручну.
 
     **3. Відправка звіту**:
-    - Після перевірки даних завантажте скріншоти видачі/лікування у поле **"2. Докази"**.
+    - Після перевірки даних завантажте скріншоти докази оплати у поле **"2. Докази"**.
     - Натисніть `🚀 ВІДПРАВИТИ`.
     - Звіт автоматично полетить у Discord канал!
     """)
@@ -248,3 +248,4 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("✅ Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
