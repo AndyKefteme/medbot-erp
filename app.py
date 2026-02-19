@@ -12,12 +12,31 @@ from streamlit_cropper import st_cropper
 from datetime import datetime, timedelta
 from requests_oauthlib import OAuth2Session
 
-# --- 1. ПЕРЕВІРКА ДЛЯ CRON-JOB (KEEP ALIVE) ---
+# --- КОНФІГУРАЦІЯ СТОРІНКИ (Приховуємо вихідний код) ---
+st.set_page_config(
+    layout="wide", 
+    page_title="MedBot ERP Pro", 
+    page_icon="🏥",
+    initial_sidebar_state="expanded"
+)
+
+# Стилі для приховування кнопок GitHub, Deploy та меню
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stDeployButton {display:none;}
+    [data-testid="stToolbar"] {visibility: hidden !important;}
+    </style>
+""", unsafe_allow_html=True)
+
+# --- 1. ПЕРЕВІРКА ДЛЯ CRON-JOB ---
 if st.query_params.get("keepalive") == "1":
     st.write("Server is active")
     st.stop()
 
-# --- ІНІЦІАЛІЗАЦІЯ СТАНІВ СЕСІЇ ---
+# --- ІНІЦІАЛІЗАЦІЯ СТАНІВ ---
 if 'auth_user' not in st.session_state:
     st.session_state.auth_user = None
 if 'oauth_state' not in st.session_state:
@@ -36,8 +55,6 @@ cursor.execute('CREATE TABLE IF NOT EXISTS whitelist (user_id TEXT PRIMARY KEY, 
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
 cursor.execute('CREATE TABLE IF NOT EXISTS sessions (user_id TEXT PRIMARY KEY, user_name TEXT, token_data TEXT, expiry TEXT, is_admin INTEGER)')
 conn.commit()
-
-st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
 
 @st.cache_resource
 def load_ocr():
@@ -73,17 +90,11 @@ def compress_image(image_file):
 def handle_discord_login():
     code = st.query_params.get("code")
     
+    # Спроба знайти сесію користувача у базі (тільки якщо в st.session_state ще порожньо)
     if not code and st.session_state.auth_user is None:
-        saved = cursor.execute("SELECT user_id, user_name, token_data, expiry, is_admin FROM sessions WHERE expiry > ?", 
-                              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()
-        if saved:
-            u_id = saved[0]
-            if is_blacklisted(u_id):
-                cursor.execute("DELETE FROM sessions WHERE user_id = ?", (u_id,))
-                conn.commit()
-                return
-            st.session_state.auth_user = {"id": u_id, "username": saved[1], "is_admin": bool(saved[4])}
-            return
+        # Тут ми нічого не робимо автоматично, користувач має натиснути "Увійти" 
+        # або Streamlit сам тримає сесію в межах одного браузера.
+        pass
 
     if not code and st.session_state.auth_user is None:
         discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], scope=["identify", "guilds.members.read"])
@@ -102,8 +113,7 @@ def handle_discord_login():
             
             ban_reason = is_blacklisted(u_id)
             if ban_reason: 
-                st.error(f"🚫 Ви заблоковані. Причина: {ban_reason}")
-                st.stop()
+                st.error(f"🚫 Бан: {ban_reason}"); st.stop()
 
             u_roles = m_res.get('roles', [])
             is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
@@ -111,15 +121,10 @@ def handle_discord_login():
                 server_nick = m_res.get('nick') or m_res.get('user', {}).get('username')
                 st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
                 expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?, ?)", 
-                               (u_id, server_nick, json.dumps(token), expiry, 1 if is_adm else 0))
+                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?, ?)", (u_id, server_nick, json.dumps(token), expiry, 1 if is_adm else 0))
                 conn.commit(); st.query_params.clear(); st.rerun()
-            else: 
-                st.error("У вас немає необхідної ролі.")
-                st.stop()
-        except Exception as e: 
-            st.error(f"Помилка авторизації: {e}")
-            st.stop()
+            else: st.error("Немає доступу"); st.stop()
+        except: st.error("Помилка авторизації"); st.stop()
 
 handle_discord_login()
 user = st.session_state.auth_user
@@ -132,27 +137,19 @@ else: st.sidebar.caption("🩺 Співробітник")
 
 menu = st.sidebar.radio("Навігація", ["📄 Сканер", "⚙️ Налаштування", "📊 Адмін-панель", "🚪 Вихід"])
 
-st.sidebar.markdown("---")
-with st.sidebar.expander("❓ Як користуватись?"):
-    st.markdown("""
-    **1. Налаштування** (Один раз): `⚙️ Налаштування` -> Завантажити фото -> Виділити зони -> `💾 Зберегти`.
-    **2. Сканер**: `📄 Сканер` -> Завантажити паспорти -> `🔍 Сканувати`.
-    **3. Звіт**: Перевірити текст -> Завантажити докази -> `🚀 ВІДПРАВИТИ`.
-    """)
-
 if menu == "🚪 Вихід":
     cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user['id'],))
     conn.commit(); st.session_state.auth_user = None; st.rerun()
 
 elif menu == "📊 Адмін-панель":
     if not user.get('is_admin'):
-        st.error("Доступ заборонено.")
+        st.error("У вас немає прав доступу до цієї панелі.")
     else:
-        t_logs, t_ban, t_white, t_users = st.tabs(["📝 Логи", "🚫 Бан-лист", "💎 Білий список", "👥 Сесії"])
+        t_logs, t_ban, t_white, t_users = st.tabs(["📝 Логи", "🚫 Бан-лист", "💎 VIP", "👥 Активні сесії"])
         
         with t_logs:
             h = cursor.execute("SELECT user_name, count, timestamp FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
-            st.table([{"Користувач": r[0], "Кількість": r[1], "Дата": r[2]} for r in h])
+            st.table([{"Користувач": r[0], "К-сть": r[1], "Дата": r[2]} for r in h])
         
         with t_ban:
             c1, c2 = st.columns(2)
@@ -160,44 +157,45 @@ elif menu == "📊 Адмін-панель":
             breason = c2.text_input("Причина бану")
             if st.button("🚫 Забанити"):
                 if bid:
-                    cursor.execute("REPLACE INTO blacklist VALUES (?, 'Banned', ?)", (bid, breason or "Не вказана"))
+                    cursor.execute("REPLACE INTO blacklist VALUES (?, 'Banned', ?)", (bid, breason))
                     cursor.execute("DELETE FROM sessions WHERE user_id = ?", (bid,))
-                    conn.commit(); st.success(f"Забанено {bid}"); st.rerun()
-            for b_id, b_reason in cursor.execute("SELECT user_id, reason FROM blacklist").fetchall():
+                    conn.commit(); st.rerun()
+            for b in cursor.execute("SELECT user_id, reason FROM blacklist").fetchall():
                 col_a, col_b = st.columns([3, 1])
-                col_a.write(f"🆔 `{b_id}` | Причина: *{b_reason}*")
-                if col_b.button("Розбан", key=f"unban_{b_id}"):
-                    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (b_id,)); conn.commit(); st.rerun()
+                col_a.write(f"🆔 `{b[0]}` | Причина: {b[1]}")
+                if col_b.button("Розбан", key=f"un_{b[0]}"):
+                    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (b[0],)); conn.commit(); st.rerun()
 
         with t_white:
             c1, c2 = st.columns(2)
             wid = c1.text_input("Discord ID для VIP")
-            wname = c2.text_input("Примітка")
-            if st.button("➕ Додати VIP"):
-                if wid:
-                    cursor.execute("REPLACE INTO whitelist VALUES (?, ?)", (wid, wname))
-                    conn.commit(); st.rerun()
-            for w_id, w_note in cursor.execute("SELECT user_id, user_name FROM whitelist").fetchall():
+            wname = c2.text_input("Примітка для VIP")
+            if st.button("➕ Додати"):
+                cursor.execute("REPLACE INTO whitelist VALUES (?, ?)", (wid, wname))
+                conn.commit(); st.rerun()
+            for w in cursor.execute("SELECT user_id, user_name FROM whitelist").fetchall():
                 col_a, col_b = st.columns([3, 1])
-                col_a.write(f"💎 `{w_id}` | 🏷 {w_note}")
-                if col_b.button("Видалити", key=f"delw_{w_id}"):
-                    cursor.execute("DELETE FROM whitelist WHERE user_id = ?", (w_id,)); conn.commit(); st.rerun()
+                col_a.write(f"💎 `{w[0]}` | {w[1]}")
+                if col_b.button("Видалити", key=f"dw_{w[0]}"):
+                    cursor.execute("DELETE FROM whitelist WHERE user_id = ?", (w[0],)); conn.commit(); st.rerun()
 
         with t_users:
-            for s_id, s_name, s_exp, s_adm in cursor.execute("SELECT user_id, user_name, expiry, is_admin FROM sessions").fetchall():
+            st.write("### Всі авторизовані користувачі")
+            for r in cursor.execute("SELECT user_id, user_name, expiry, is_admin FROM sessions").fetchall():
                 col_a, col_b = st.columns([3, 1])
-                col_a.code(f"{'👑' if s_adm else '🩺'} {s_name} | ID: {s_id} | До: {s_exp}")
-                if col_b.button("Видалити", key=f"ks_{s_id}"):
-                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (s_id,)); conn.commit(); st.rerun()
+                col_a.code(f"{'👑' if r[3] else '🩺'} {r[1]} | ID: {r[0]} | До: {r[2]}")
+                if col_b.button("Видалити", key=f"ks_{r[0]}"):
+                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (r[0],)); conn.commit(); st.rerun()
 
 elif menu == "⚙️ Налаштування":
-    st.header("📐 Трафарет")
+    st.header("📐 Налаштування трафарету")
     c1, c2, c3 = st.columns(3)
     c1.write(f"Прізвище: {'✅' if current_coords['Surname'] else '❌'}")
     c2.write(f"Ім'я: {'✅' if current_coords['Name'] else '❌'}")
     c3.write(f"ID: {'✅' if current_coords['ID'] else '❌'}")
     if st.button("🗑 Скинути"):
         save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None}); st.rerun()
+    
     f = st.file_uploader("Завантажте фото", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
@@ -237,23 +235,20 @@ elif menu == "📄 Сканер":
             
             c_files = st.file_uploader("2. Докази", accept_multiple_files=True)
             if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
-                if not c_files: 
-                    st.error("Додайте докази.")
+                if not c_files: st.error("Додайте докази.")
                 else:
-                    # --- ЗМІНЕНО ТУТ ---
+                    # Твій новий формат
                     user_mention = f"<@{user['id']}>"
                     server_nick = user['username']
                     user_info_report = f"{user_mention} | {server_nick}"
                     
-                    msg = f"🏥 **НОВИЙ ЗВІТ ЕМС**\n**Співробітник:** {user_info_report}\n**Кількість:** {len(final)}\n\n" + \
+                    msg = f"🏥 **ЗВІТ**\n**Співробітник:** {user_info_report}\n**К-сть:** {len(final)}\n\n" + \
                           "\n".join([f"• {r['Surname']} {r['Name']} [ID: {r['ID']}]" for r in final])
-                    # --------------------
                     
                     try:
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": msg}, files=st.session_state.passport_payload)
                         c_pay = [(f"c{i}", (f"c_{i}.jpg", compress_image(cf).read(), "image/jpeg")) for i, cf in enumerate(c_files)]
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази:**"}, files=c_pay)
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
-                        conn.commit()
-                        st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
+                        conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
