@@ -246,27 +246,43 @@ elif menu == "📊 Адмін-панель":
 
 elif menu == "⚙️ Налаштування":
     st.header("📐 Налаштування трафарету")
-    c1, c2, c3 = st.columns(3)
-    c1.write(f"Прізвище: {'✅' if current_coords['Surname'] else '❌'}")
-    c2.write(f"Ім'я: {'✅' if current_coords['Name'] else '❌'}")
-    c3.write(f"ID: {'✅' if current_coords['ID'] else '❌'}")
-    if st.button("🗑 Скинути"):
-        save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None}); st.rerun()
     
-    f = st.file_uploader("Завантажте фото", type=['png','jpg','jpeg'])
+    # Виводимо статус кожної зони
+    c1, c2, c3 = st.columns(3)
+    c1.write(f"Прізвище: {'✅' if current_coords.get('Surname') else '❌'}")
+    c2.write(f"Ім'я: {'✅' if current_coords.get('Name') else '❌'}")
+    c3.write(f"ID: {'✅' if current_coords.get('ID') else '❌'}")
+    
+    if st.button("🗑 Скинути всі налаштування"):
+        save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None})
+        st.rerun()
+    
+    f = st.file_uploader("Завантажте зразок фото", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        target = st.selectbox("Оберіть зону для виділення", ["Surname", "Name", "ID"])
+        
+        # Відображення кроппера
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button("💾 Зберегти"):
-            # Робимо реальну копію словника, щоб уникнути помилок посилань
-            new_c = current_coords.copy() 
-            new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
+        
+        if st.button(f"💾 Зберегти зону {target}"):
+            # Створюємо чистий словник для запису
+            updated_coords = {
+                "Surname": current_coords.get("Surname"),
+                "Name": current_coords.get("Name"),
+                "ID": current_coords.get("ID")
+            }
             
-            # Зберігаємо в базу
-            save_user_coords(user['id'], new_c)
+            # Записуємо нові координати як цілі числа
+            updated_coords[target] = (
+                int(rect['left']), 
+                int(rect['top']), 
+                int(rect['width']), 
+                int(rect['height'])
+            )
             
-            st.success(f"✅ Зона {target} збережена!")
+            save_user_coords(user['id'], updated_coords)
+            st.success(f"Зона {target} успішно оновлена!")
             time.sleep(1)
             st.rerun()
 
@@ -316,5 +332,6 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
 
 
