@@ -1,4 +1,5 @@
 import streamlit as st
+import cv2
 import numpy as np
 import easyocr
 import requests
@@ -12,7 +13,9 @@ from streamlit_cropper import st_cropper
 from datetime import datetime
 from requests_oauthlib import OAuth2Session
 
-# --- КОНФІГУРАЦІЯ ---
+# --- НАЛАШТУВАННЯ ---
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
 try:
     with open("config.json", "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -36,12 +39,13 @@ def load_ocr():
 
 reader = load_ocr()
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+# --- ФУНКЦІЇ ---
 def save_user_coords(u_id, coords):
     cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (u_id, json.dumps(coords)))
     conn.commit()
 
 def load_user_coords(u_id):
+    if not u_id: return {"Surname": None, "Name": None, "ID": None}
     saved = cursor.execute("SELECT coords_json FROM user_coords WHERE user_id = ?", (u_id,)).fetchone()
     if saved: return json.loads(saved[0])
     return {"Surname": None, "Name": None, "ID": None}
@@ -60,13 +64,15 @@ if 'oauth_state' not in st.session_state:
     st.session_state.oauth_state = None
 if 'scanned_data' not in st.session_state:
     st.session_state.scanned_data = []
+if 'passport_payload' not in st.session_state:
+    st.session_state.passport_payload = []
+if 'file_uploader_key' not in st.session_state:
+    st.session_state.file_uploader_key = 0
 
-# --- АВТОРИЗАЦІЯ DISCORD (ВИПРАВЛЕНО) ---
+# --- АВТОРИЗАЦІЯ ---
 def handle_discord_login():
-    # 1. Отримуємо код з URL за новим API
     code = st.query_params.get("code")
 
-    # 2. Якщо коду немає і юзер не в системі — створюємо посилання
     if not code and st.session_state.auth_user is None:
         discord = OAuth2Session(
             config['DISCORD_CLIENT_ID'],
@@ -74,18 +80,13 @@ def handle_discord_login():
             scope=["identify", "guilds", "guilds.members.read"]
         )
         auth_url, state = discord.authorization_url("https://discord.com/api/oauth2/authorize")
-        
-        # Зберігаємо state для перевірки при поверненні
         st.session_state.oauth_state = state
         
         st.title("🏥 MedBot ERP System")
-        st.write("Для початку роботи необхідно авторизуватися:")
-        
-        # Використовуємо офіційну кнопку Streamlit для зовнішніх посилань
-        st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
+        st.write("Необхідна авторизація через Discord для доступу до системи.")
+        st.link_button("🔑 УВІЙТИ В СИСТЕМУ", auth_url, type="primary")
         st.stop()
 
-    # 3. Якщо код повернувся — обмінюємо його на токен
     if code and st.session_state.auth_user is None:
         try:
             discord = OAuth2Session(
@@ -93,51 +94,46 @@ def handle_discord_login():
                 redirect_uri=config['DISCORD_REDIRECT_URI'],
                 state=st.session_state.oauth_state
             )
-            
             token = discord.fetch_token(
                 "https://discord.com/api/oauth2/token",
                 client_secret=config['DISCORD_CLIENT_SECRET'],
                 code=code
             )
-            
-            user_data = discord.get("https://discord.com/api/users/@me").json()
-            
-            # Перевірка ролей на сервері
-            m_url = f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member"
-            m_res = discord.get(m_url)
-            
-            if m_res.status_code == 200:
-                m_data = m_res.json()
-                u_roles = m_data.get('roles', [])
-                is_adm = config['ADMIN_ROLE_ID'] in u_roles
-                is_allowed = config['ALLOWED_ROLE_ID'] in u_roles or is_adm
-                
-                if is_allowed:
-                    st.session_state.auth_user = {
-                        "id": user_data["id"], 
-                        "username": user_data["username"], 
-                        "is_admin": is_adm
-                    }
-                    st.query_params.clear()
-                    st.rerun()
-                else:
-                    st.error("🚫 Доступ заборонено: у вас немає потрібної ролі.")
-                    st.stop()
-            else:
-                st.error("❌ Ви не є учасником Discord сервера.")
+            u_data = discord.get("https://discord.com/api/users/@me").json()
+            u_id = u_data['id']
+
+            # Перевірка бану
+            if cursor.execute("SELECT user_id FROM blacklist WHERE user_id = ?", (u_id,)).fetchone():
+                st.error("❌ Ваш доступ заблоковано.")
                 st.stop()
-                
+
+            # Перевірка ролей
+            m_url = f"https://discord.com/api/users/@me/guilds/{config['GUILD_ID']}/member"
+            m_res = discord.get(m_url).json()
+            u_roles = m_res.get('roles', [])
+            is_adm = config['ADMIN_ROLE_ID'] in u_roles
+            is_allowed = config['ALLOWED_ROLE_ID'] in u_roles or is_adm
+            
+            if not is_allowed:
+                st.error("❌ У вас немає доступу (відсутня роль).")
+                st.stop()
+
+            st.session_state.auth_user = {"id": u_id, "username": u_data['username'], "is_admin": is_adm}
+            st.query_params.clear()
+            st.rerun()
         except Exception as e:
-            st.error(f"Помилка OAuth: {e}")
-            if st.button("Спробувати ще раз"):
+            st.error(f"Помилка авторизації: {e}")
+            if st.button("Спробувати знову"):
                 st.query_params.clear()
                 st.rerun()
             st.stop()
 
-# Запуск логіки входу
+# Перевірка входу
 handle_discord_login()
+user = st.session_state.auth_user
+current_coords = load_user_coords(user['id'])
 
-# --- МЕНЮ ---
+# --- МЕНЮ (ТВОЄ ОФОРМЛЕННЯ) ---
 st.sidebar.title(f"👤 {user['username']}")
 if user['is_admin']: st.sidebar.subheader("👑 Адміністратор")
 else: st.sidebar.caption("🩺 Співробітник")
@@ -243,4 +239,3 @@ elif menu == "📄 Сканер":
                         st.session_state.file_uploader_key += 1
                         st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
-
