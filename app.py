@@ -4,15 +4,15 @@ import easyocr
 import requests
 import sqlite3
 import re
-import os
 import io
 import time
+import json
 from PIL import Image
 from streamlit_cropper import st_cropper
 from datetime import datetime, timedelta
 from requests_oauthlib import OAuth2Session
 
-# --- БАЗА ДАНИХ (Зберігаємо сесії та координати) ---
+# --- БАЗА ДАНИХ (Локальне сховище для GitHub + Streamlit Cloud) ---
 conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
@@ -31,12 +31,10 @@ reader = load_ocr()
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def save_user_coords(u_id, coords):
-    import json
     cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (u_id, json.dumps(coords)))
     conn.commit()
 
 def load_user_coords(u_id):
-    import json
     saved = cursor.execute("SELECT coords_json FROM user_coords WHERE user_id = ?", (u_id,)).fetchone()
     if saved: return json.loads(saved[0])
     return {"Surname": None, "Name": None, "ID": None}
@@ -48,16 +46,17 @@ def compress_image(image_file):
     buf.seek(0)
     return buf
 
-# --- АВТОРИЗАЦІЯ ЧЕРЕЗ SECRETS ---
+# --- АВТОРИЗАЦІЯ ---
 def handle_discord_login():
     code = st.query_params.get("code")
     
     if not code and st.session_state.get('auth_user') is None:
-        # Спроба знайти існуючу сесію в БД
+        # Перевірка сесії в БД (щоб не логінитись щоразу)
         saved = cursor.execute("SELECT user_id, token_data, expiry FROM sessions LIMIT 1").fetchone()
         if saved and datetime.now() < datetime.strptime(saved[2], "%Y-%m-%d %H:%M:%S"):
-            # Тут ми просто "пропускаємо", але для надійності краще повторний логін
-            pass
+            # Відновлюємо мінімальні дані (повні дані підтягнуться після rerun або дій)
+            st.session_state.auth_user = {"id": saved[0], "username": "Співробітник", "is_admin": False}
+            return
 
         discord = OAuth2Session(
             st.secrets["DISCORD_CLIENT_ID"],
@@ -68,6 +67,7 @@ def handle_discord_login():
         st.session_state.oauth_state = state
         
         st.title("🏥 MedBot ERP System")
+        st.write("Будь ласка, авторизуйтесь для доступу до системи.")
         st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
         st.stop()
 
@@ -80,21 +80,22 @@ def handle_discord_login():
                                         client_secret=st.secrets["DISCORD_CLIENT_SECRET"],
                                         code=code)
             
-            # Отримання даних про нікнейм на сервері
+            # Отримання даних учасника сервера
             m_url = f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member"
             m_res = discord.get(m_url).json()
             
-            # Твій запит: Використовуємо нік на сервері (nick)
+            # Пріоритет імені: Нік на сервері -> Глобальне ім'я -> Логін
             server_nick = m_res.get('nick') or m_res.get('user', {}).get('global_name') or m_res.get('user', {}).get('username')
             u_id = m_res.get('user', {}).get('id')
             u_roles = m_res.get('roles', [])
             
             is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
-            if st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm:
+            is_allowed = st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm
+            
+            if is_allowed:
                 st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
                 
-                # Зберігаємо сесію в БД на 7 днів
-                import json
+                # Збереження сесії на 7 днів
                 expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?)", (u_id, json.dumps(token), expiry))
                 conn.commit()
@@ -102,7 +103,7 @@ def handle_discord_login():
                 st.query_params.clear()
                 st.rerun()
             else:
-                st.error("Доступ заборонено роллю.")
+                st.error("🚫 Доступ заборонено: у вас немає потрібної ролі.")
                 st.stop()
         except Exception as e:
             st.error(f"Помилка входу: {e}")
@@ -112,7 +113,7 @@ handle_discord_login()
 user = st.session_state.auth_user
 current_coords = load_user_coords(user['id'])
 
-# --- МЕНЮ ТА ОФОРМЛЕННЯ ---
+# --- МЕНЮ (ТВОЄ ОФОРМЛЕННЯ) ---
 st.sidebar.title(f"👤 {user['username']}")
 if user['is_admin']: st.sidebar.subheader("👑 Адміністратор")
 else: st.sidebar.caption("🩺 Співробітник")
@@ -125,32 +126,52 @@ if menu == "🚪 Вихід":
     st.session_state.auth_user = None
     st.rerun()
 
+elif menu == "📊 Адмін-панель":
+    if not user['is_admin']:
+        st.warning("Доступ заборонено.")
+    else:
+        st.header("🛡 Управління")
+        t_logs, t_users = st.tabs(["📝 Логи", "👥 Користувачі"])
+        with t_logs:
+            h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
+            st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
+        with t_users:
+            for r in cursor.execute("SELECT user_id FROM sessions").fetchall():
+                st.code(f"ID: {r[0]} (Активна сесія)")
+
 elif menu == "⚙️ Налаштування":
-    st.header("📐 Трафарет")
+    st.header("📐 Налаштування трафарету")
+    
+    # Статус полів (Галочки)
     c1, c2, c3 = st.columns(3)
     c1.write(f"Прізвище: {'✅' if current_coords['Surname'] else '❌'}")
     c2.write(f"Ім'я: {'✅' if current_coords['Name'] else '❌'}")
     c3.write(f"ID: {'✅' if current_coords['ID'] else '❌'}")
 
+    if st.button("🗑 Очистити координати"):
+        save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None})
+        st.rerun()
+
     f = st.file_uploader("Завантажте зразок", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
+        target = st.selectbox("Оберіть зону", ["Surname", "Name", "ID"])
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button("💾 Зберегти"):
+        if st.button("💾 Зберегти координати"):
             new_c = current_coords
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             save_user_coords(user['id'], new_c)
-            st.success(f"Збережено координати для {target}")
+            st.success(f"✅ Зону {target} збережено!")
             time.sleep(1)
             st.rerun()
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.warning("⚠️ Налаштуйте координати!")
+        st.warning("⚠️ Налаштуйте всі зони (Surname, Name, ID) в Налаштуваннях!")
     else:
         st.header("📸 Новий звіт")
-        p_files = st.file_uploader("1. Паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
+        p_files = st.file_uploader("1. Завантажте паспорти", accept_multiple_files=True, type=['png','jpg','jpeg'])
+        
         if p_files and st.button("🔍 Розпізнати"):
             st.session_state.scanned_data = []
             st.session_state.passport_payload = []
@@ -167,19 +188,21 @@ elif menu == "📄 Сканер":
             st.rerun()
 
         if st.session_state.get('scanned_data'):
+            st.subheader("📝 Перевірка")
             final = []
             for idx, item in enumerate(st.session_state.scanned_data):
                 cols = st.columns([3, 3, 2])
-                s = cols[0].text_input(f"Прізвище #{idx}", item['Surname'], key=f"s_{idx}")
-                n = cols[1].text_input(f"Ім'я #{idx}", item['Name'], key=f"n_{idx}")
-                u = cols[2].text_input(f"ID #{idx}", item['ID'], key=f"u_{idx}")
+                s = cols[0].text_input(f"Прізвище #{idx+1}", item['Surname'], key=f"s_{idx}")
+                n = cols[1].text_input(f"Ім'я #{idx+1}", item['Name'], key=f"n_{idx}")
+                u = cols[2].text_input(f"ID #{idx+1}", item['ID'], key=f"u_{idx}")
                 final.append({"Surname": s, "Name": n, "ID": u})
             
-            c_files = st.file_uploader("2. Докази", accept_multiple_files=True, type=['png','jpg','jpeg'])
+            c_files = st.file_uploader("2. Докази розрахунку", accept_multiple_files=True, type=['png','jpg','jpeg'])
             if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
-                if not c_files: st.error("Додайте докази!")
+                if not c_files:
+                    st.error("Будь ласка, додайте докази розрахунку!")
                 else:
-                    # ФОРМАТ НІКУ ЯК ТИ ПРОСИВ
+                    # ФОРМАТ ЗВІТУ ЯК ТИ ПРОСИВ
                     user_mention = f"<@{user['id']}>"
                     server_nick = user['username']
                     user_info_report = f"{user_mention} | {server_nick}"
@@ -188,17 +211,23 @@ elif menu == "📄 Сканер":
                           "\n".join([f"• {r['Surname']} {r['Name']} #{r['ID']}" for r in final])
                     
                     try:
+                        # Відправка основного звіту та паспортів
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": msg}, files=st.session_state.passport_payload)
+                        
+                        # Відправка доказів
                         c_pay = []
                         for i, cf in enumerate(c_files):
                             c_buf = compress_image(cf)
                             c_pay.append((f"c{i}", (f"c_{i}.jpg", c_buf.read(), "image/jpeg")))
-                        requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази:**"}, files=c_pay)
+                        requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази розрахунку:**"}, files=c_pay)
                         
+                        # Логування
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], server_nick, len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit()
-                        st.success("✅ Надіслано!")
+                        
+                        st.success("✅ Звіт успішно надіслано!")
                         st.session_state.scanned_data = []
                         time.sleep(2)
                         st.rerun()
-                    except Exception as e: st.error(f"Помилка: {e}")
+                    except Exception as e:
+                        st.error(f"Помилка при відправці: {e}")
