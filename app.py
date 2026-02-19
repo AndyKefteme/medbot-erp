@@ -12,7 +12,13 @@ from streamlit_cropper import st_cropper
 from datetime import datetime, timedelta
 from requests_oauthlib import OAuth2Session
 
-# --- ІНІЦІАЛІЗАЦІЯ СТАНІВ СЕСІЇ (Виправлення помилки oauth_state) ---
+# --- 1. ПЕРЕВІРКА ДЛЯ CRON-JOB (KEEP ALIVE) ---
+# Налаштуйте в cron-job.org URL: https://ems-zvit.streamlit.app/?keepalive=1
+if st.query_params.get("keepalive") == "1":
+    st.write("Server is active")
+    st.stop()
+
+# --- ІНІЦІАЛІЗАЦІЯ СТАНІВ СЕСІЇ ---
 if 'auth_user' not in st.session_state:
     st.session_state.auth_user = None
 if 'oauth_state' not in st.session_state:
@@ -26,9 +32,10 @@ if 'passport_payload' not in st.session_state:
 conn = sqlite3.connect("medbot_db.sqlite", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('CREATE TABLE IF NOT EXISTS logs (user_id TEXT, user_name TEXT, count INTEGER, timestamp TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY)')
+cursor.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT PRIMARY KEY, user_name TEXT)')
 cursor.execute('CREATE TABLE IF NOT EXISTS user_coords (user_id TEXT PRIMARY KEY, coords_json TEXT)')
-cursor.execute('CREATE TABLE IF NOT EXISTS sessions (user_id TEXT PRIMARY KEY, token_data TEXT, expiry TEXT)')
+# Додано is_admin в сесії
+cursor.execute('CREATE TABLE IF NOT EXISTS sessions (user_id TEXT PRIMARY KEY, token_data TEXT, expiry TEXT, is_admin INTEGER)')
 conn.commit()
 
 st.set_page_config(layout="wide", page_title="MedBot ERP Pro", page_icon="🏥")
@@ -40,6 +47,10 @@ def load_ocr():
 reader = load_ocr()
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
+def is_blacklisted(u_id):
+    res = cursor.execute("SELECT 1 FROM blacklist WHERE user_id = ?", (u_id,)).fetchone()
+    return res is not None
+
 def save_user_coords(u_id, coords):
     cursor.execute("REPLACE INTO user_coords VALUES (?, ?)", (u_id, json.dumps(coords)))
     conn.commit()
@@ -60,71 +71,54 @@ def compress_image(image_file):
 def handle_discord_login():
     code = st.query_params.get("code")
     
-    # Спроба відновити сесію з БД, якщо користувач ще не в системі в поточному вікні
+    # Відновлення сесії
     if not code and st.session_state.auth_user is None:
-        saved = cursor.execute("SELECT user_id, token_data, expiry FROM sessions LIMIT 1").fetchone()
+        saved = cursor.execute("SELECT user_id, token_data, expiry, is_admin FROM sessions LIMIT 1").fetchone()
         if saved and datetime.now() < datetime.strptime(saved[2], "%Y-%m-%d %H:%M:%S"):
-            # Тут ми лише ставимо заглушку, повні дані прийдуть після взаємодії
-            st.session_state.auth_user = {"id": saved[0], "username": "Співробітник", "is_admin": False}
+            if is_blacklisted(saved[0]):
+                st.error("🚫 Ви заблоковані.")
+                st.stop()
+            st.session_state.auth_user = {"id": saved[0], "username": "Співробітник", "is_admin": bool(saved[3])}
             return
 
-    # Якщо немає коду і сесії — показуємо кнопку входу
     if not code and st.session_state.auth_user is None:
-        discord = OAuth2Session(
-            st.secrets["DISCORD_CLIENT_ID"],
-            redirect_uri=st.secrets["DISCORD_REDIRECT_URI"],
-            scope=["identify", "guilds", "guilds.members.read"]
-        )
+        discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], 
+                                redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], 
+                                scope=["identify", "guilds", "guilds.members.read"])
         auth_url, state = discord.authorization_url("https://discord.com/api/oauth2/authorize")
         st.session_state.oauth_state = state
-        
         st.title("🏥 MedBot ERP System")
-        st.write("Авторизуйтесь через Discord для доступу.")
         st.link_button("🔑 УВІЙТИ ЧЕРЕЗ DISCORD", auth_url, type="primary")
         st.stop()
 
-    # Обробка повернення від Discord
     if code and st.session_state.auth_user is None:
         try:
-            discord = OAuth2Session(
-                st.secrets["DISCORD_CLIENT_ID"], 
-                redirect_uri=st.secrets["DISCORD_REDIRECT_URI"],
-                state=st.session_state.oauth_state
-            )
-            token = discord.fetch_token(
-                "https://discord.com/api/oauth2/token",
-                client_secret=st.secrets["DISCORD_CLIENT_SECRET"],
-                code=code
-            )
+            discord = OAuth2Session(st.secrets["DISCORD_CLIENT_ID"], 
+                                    redirect_uri=st.secrets["DISCORD_REDIRECT_URI"], 
+                                    state=st.session_state.oauth_state)
+            token = discord.fetch_token("https://discord.com/api/oauth2/token", 
+                                        client_secret=st.secrets["DISCORD_CLIENT_SECRET"], 
+                                        code=code)
+            m_res = discord.get(f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member").json()
             
-            m_url = f"https://discord.com/api/users/@me/guilds/{st.secrets['GUILD_ID']}/member"
-            m_res = discord.get(m_url).json()
-            
-            server_nick = m_res.get('nick') or m_res.get('user', {}).get('global_name') or m_res.get('user', {}).get('username')
             u_id = m_res.get('user', {}).get('id')
-            u_roles = m_res.get('roles', [])
-            
-            is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
-            is_allowed = st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm
-            
-            if is_allowed:
-                st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
-                
-                # Зберігаємо в БД
-                expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?)", (u_id, json.dumps(token), expiry))
-                conn.commit()
-                
-                st.query_params.clear()
-                st.rerun()
-            else:
-                st.error("🚫 Відмовлено у доступі: відсутня роль на сервері.")
+            if is_blacklisted(u_id):
+                st.error("🚫 Доступ заблоковано.")
                 st.stop()
-        except Exception as e:
-            st.error(f"Помилка авторизації: {e}")
-            if st.button("Спробувати знову"):
+
+            server_nick = m_res.get('nick') or m_res.get('user', {}).get('global_name') or m_res.get('user', {}).get('username')
+            u_roles = m_res.get('roles', [])
+            is_adm = st.secrets['ADMIN_ROLE_ID'] in u_roles
+            
+            if st.secrets['ALLOWED_ROLE_ID'] in u_roles or is_adm:
+                st.session_state.auth_user = {"id": u_id, "username": server_nick, "is_admin": is_adm}
+                expiry = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute("REPLACE INTO sessions VALUES (?, ?, ?, ?)", (u_id, json.dumps(token), expiry, 1 if is_adm else 0))
+                conn.commit()
                 st.query_params.clear()
                 st.rerun()
+        except Exception as e:
+            st.error(f"Помилка: {e}")
             st.stop()
 
 handle_discord_login()
@@ -146,73 +140,75 @@ if menu == "🚪 Вихід":
 
 elif menu == "📊 Адмін-панель":
     if not user['is_admin']:
-        st.warning("У вас немає прав доступу до цієї панелі.")
+        st.warning("Немає прав.")
     else:
-        st.header("🛡 Адміністрування")
-        t_logs, t_users = st.tabs(["📝 Останні звіти", "👥 Активні сесії"])
+        t_logs, t_ban, t_users = st.tabs(["📝 Логи", "🚫 Бан-лист", "👥 Сесії"])
         with t_logs:
             h = cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50").fetchall()
             st.table([{"Користувач": r[1], "К-сть": r[2], "Дата": r[3]} for r in h])
-        with t_users:
-            for r in cursor.execute("SELECT user_id FROM sessions").fetchall():
-                col1, col2 = st.columns([3, 1])
-                col1.code(f"User ID: {r[0]}")
-                if col2.button("Видалити", key=f"del_{r[0]}"):
-                    cursor.execute("DELETE FROM sessions WHERE user_id = ?", (r[0],))
+        with t_ban:
+            col_id, col_name = st.columns(2)
+            bid = col_id.text_input("Discord ID")
+            bname = col_name.text_input("Примітка")
+            if st.button("Забанити користувача"):
+                cursor.execute("REPLACE INTO blacklist VALUES (?, ?)", (bid, bname))
+                cursor.execute("DELETE FROM sessions WHERE user_id = ?", (bid,))
+                conn.commit()
+                st.rerun()
+            st.write("---")
+            for b in cursor.execute("SELECT * FROM blacklist").fetchall():
+                c1, c2 = st.columns([3, 1])
+                c1.write(f"ID: {b[0]} ({b[1]})")
+                if c2.button("Розбан", key=f"un_{b[0]}"):
+                    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (b[0],))
                     conn.commit()
                     st.rerun()
+        with t_users:
+            for r in cursor.execute("SELECT user_id, is_admin FROM sessions").fetchall():
+                st.code(f"ID: {r[0]} | Admin: {bool(r[1])}")
 
 elif menu == "⚙️ Налаштування":
-    st.header("📐 Налаштування трафарету")
-    
-    # Візуальний статус (Галочки)
+    st.header("📐 Трафарет")
     c1, c2, c3 = st.columns(3)
     c1.write(f"Прізвище: {'✅' if current_coords['Surname'] else '❌'}")
     c2.write(f"Ім'я: {'✅' if current_coords['Name'] else '❌'}")
     c3.write(f"ID: {'✅' if current_coords['ID'] else '❌'}")
 
-    if st.button("🗑 Скинути всі зони"):
+    if st.button("🗑 Скинути все"):
         save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None})
         st.rerun()
 
-    f = st.file_uploader("Завантажте фото-приклад", type=['png','jpg','jpeg'])
+    f = st.file_uploader("Завантажте фото", type=['png','jpg','jpeg'])
     if f:
         img = Image.open(f).convert("RGB").resize((1920, 1080))
-        target = st.selectbox("Оберіть поле для виділення", ["Surname", "Name", "ID"])
+        target = st.selectbox("Зона", ["Surname", "Name", "ID"])
         rect = st_cropper(img, realtime_update=True, box_color='#FF0000', return_type='box')
-        if st.button(f"💾 Зберегти зону {target}"):
+        if st.button("💾 Зберегти"):
             new_c = current_coords
             new_c[target] = (rect['left'], rect['top'], rect['width'], rect['height'])
             save_user_coords(user['id'], new_c)
-            st.success(f"✅ Координати для '{target}' збережено!")
-            time.sleep(1)
             st.rerun()
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()):
-        st.error("⚠️ Необхідно налаштувати всі зони у вкладці 'Налаштування'!")
+        st.error("Налаштуйте трафарет!")
     else:
-        st.header("📸 Формування звіту")
-        p_files = st.file_uploader("1. Завантажте фото паспортів", accept_multiple_files=True, type=['png','jpg','jpeg'])
-        
-        if p_files and st.button("🔍 Почати сканування"):
+        p_files = st.file_uploader("1. Паспорти", accept_multiple_files=True)
+        if p_files and st.button("🔍 Сканувати"):
             st.session_state.scanned_data = []
             st.session_state.passport_payload = []
-            with st.spinner('Зчитування даних...'):
-                for i, f in enumerate(p_files):
-                    img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                    res = {}
-                    for lbl, (x, y, w, h) in current_coords.items():
-                        crop = img_np[int(y):int(y+h), int(x):int(x+w)]
-                        txt = " ".join([t[1] for t in reader.readtext(crop)])
-                        res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
-                    st.session_state.scanned_data.append(res)
-                    buf = compress_image(f)
-                    st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", buf.read(), "image/jpeg")))
+            for i, f in enumerate(p_files):
+                img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
+                res = {}
+                for lbl, (x, y, w, h) in current_coords.items():
+                    crop = img_np[int(y):int(y+h), int(x):int(x+w)]
+                    txt = " ".join([t[1] for t in reader.readtext(crop)])
+                    res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
+                st.session_state.scanned_data.append(res)
+                st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", compress_image(f).read(), "image/jpeg")))
             st.rerun()
 
         if st.session_state.get('scanned_data'):
-            st.subheader("📝 Перевірка та коригування")
             final = []
             for idx, item in enumerate(st.session_state.scanned_data):
                 cols = st.columns([3, 3, 2])
@@ -221,36 +217,23 @@ elif menu == "📄 Сканер":
                 u = cols[2].text_input(f"ID #{idx+1}", item['ID'], key=f"u_{idx}")
                 final.append({"Surname": s, "Name": n, "ID": u})
             
-            c_files = st.file_uploader("2. Докази оплати (скріншоти)", accept_multiple_files=True, type=['png','jpg','jpeg'])
-            if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
-                if not c_files:
-                    st.error("Додайте докази оплати!")
+            c_files = st.file_uploader("2. Докази", accept_multiple_files=True)
+            if st.button("🚀 ВІДПРАВИТИ"):
+                if not c_files: st.error("Додайте докази!")
                 else:
                     user_mention = f"<@{user['id']}>"
-                    server_nick = user['username']
-                    user_info_report = f"{user_mention} | {server_nick}"
-                    
-                    msg = f"🏥 **ЗВІТ**\n{user_info_report}\nК-сть: {len(final)}\n\n" + \
+                    msg = f"🏥 **ЗВІТ**\n{user_mention} | {user['username']}\nК-сть: {len(final)}\n\n" + \
                           "\n".join([f"• {r['Surname']} {r['Name']} #{r['ID']}" for r in final])
-                    
                     try:
-                        # 1. Основний текст + паспорти
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": msg}, files=st.session_state.passport_payload)
-                        
-                        # 2. Докази оплати
                         c_pay = []
                         for i, cf in enumerate(c_files):
-                            c_buf = compress_image(cf)
-                            c_pay.append((f"c{i}", (f"c_{i}.jpg", c_buf.read(), "image/jpeg")))
-                        requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази розрахунку:**"}, files=c_pay)
-                        
-                        # 3. Лог у базу
-                        cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], server_nick, len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            c_pay.append((f"c{i}", (f"c_{i}.jpg", compress_image(cf).read(), "image/jpeg")))
+                        requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази:**"}, files=c_pay)
+                        cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit()
-                        
-                        st.success("✅ Звіт успішно надіслано в Discord!")
+                        st.success("✅ Надіслано!")
                         st.session_state.scanned_data = []
                         time.sleep(2)
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Помилка відправки: {e}")
+                    except Exception as e: st.error(f"Помилка: {e}")
