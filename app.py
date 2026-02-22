@@ -270,7 +270,6 @@ elif menu == "📊 Адмін-панель":
 elif menu == "⚙️ Налаштування":
     st.header("📐 Налаштування трафарету")
     
-    # 1. Візуальний статус налаштувань
     c1, c2, c3 = st.columns(3)
     c1.write(f"Прізвище: {'✅' if current_coords.get('Surname') else '❌'}")
     c2.write(f"Ім'я: {'✅' if current_coords.get('Name') else '❌'}")
@@ -283,105 +282,120 @@ elif menu == "⚙️ Налаштування":
     f = st.file_uploader("Завантажте зразок фото (паспорт)", type=['png','jpg','jpeg'])
     
     if f:
-        # Відкриваємо оригінал
         img_orig = Image.open(f).convert("RGB")
-        
-        # Налаштування масштабу та вибір зони
         col_ctrl1, col_ctrl2 = st.columns([2, 3])
         with col_ctrl1:
-            target = st.selectbox("Оберіть зону для виділення", ["Surname", "Name", "ID"])
+            target = st.selectbox("Оберіть зону", ["Surname", "Name", "ID"])
         with col_ctrl2:
             zoom_factor = st.slider("🔍 Масштаб зображення (%)", 100, 400, 100, step=10)
         
-        # Розрахунок розміру відображення:
-        # Базова ширина для 100% масштабу (можна підкоригувати під свій екран)
-        display_width_100 = 1200 
+        # Розрахунок розмірів
+        display_width_100 = 1000 
         new_w = int(display_width_100 * (zoom_factor / 100))
-        new_h = int(new_w * (1080 / 1920)) # Зберігаємо пропорції 16:9
-        
+        new_h = int(new_w * (1080 / 1920))
         img_display = img_orig.resize((new_w, new_h))
         
-        st.info(f"Наближення: {zoom_factor}%. Якщо фото не влазить — скористайтеся полосою прокрутки внизу.")
+        st.info(f"Масштаб: {zoom_factor}%. Використовуйте прокрутку знизу, якщо фото не влізає.")
         
-        # Обгортаємо кроппер у контейнер із прокруткою (CSS)
-        st.markdown(
-            f'<div style="width: 100%; overflow-x: auto; border: 1px solid #444; border-radius: 10px;">', 
-            unsafe_allow_html=True
-        )
+        # Обгортка з примусовим Scrollbar
+        st.markdown(f"""
+            <style>
+                .scroll-container {{
+                    width: 100%;
+                    overflow-x: auto !important;
+                    border: 2px solid #444;
+                    padding: 5px;
+                    background: #111;
+                }}
+                .scroll-content {{
+                    width: {new_w}px;
+                }}
+            </style>
+            <div class="scroll-container">
+                <div class="scroll-content">
+        """, unsafe_allow_html=True)
         
-        # Кроппер із забороною автоматичного ресайзу
-        rect = st_cropper(
-            img_display, 
-            realtime_update=True, 
-            box_color='#00FF00', 
-            return_type='box',
-            should_resize_image=False # Це змушує його тримати заданий нами new_w
-        )
+        rect = st_cropper(img_display, realtime_update=True, box_color='#00FF00', return_type='box', should_resize_image=False)
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div></div><br>', unsafe_allow_html=True)
         
         if st.button(f"💾 Зберегти зону {target}", type="primary"):
-            # Коефіцієнт масштабу відносно ідеального розміру 1920x1080
-            # (координати в базу мають лягати так, ніби фото завжди 1920x1080)
             actual_scale = new_w / 1920
+            updated_coords = current_coords.copy()
             
-            # Робимо копію, щоб не було проблем із посиланнями в пам'яті
-            updated_coords = {
-                "Surname": current_coords.get("Surname"),
-                "Name": current_coords.get("Name"),
-                "ID": current_coords.get("ID")
-            }
-            
-            # Перераховуємо координати назад у 1920x1080
+            # Зберігаємо координати, обмежуючи їх, щоб не вилітали за межі фото
             updated_coords[target] = (
-                int(rect['left'] / actual_scale), 
-                int(rect['top'] / actual_scale), 
-                int(rect['width'] / actual_scale), 
-                int(rect['height'] / actual_scale)
+                max(0, int(rect['left'] / actual_scale)),
+                max(0, int(rect['top'] / actual_scale)),
+                max(1, int(rect['width'] / actual_scale)),
+                max(1, int(rect['height'] / actual_scale))
             )
             
             save_user_coords(user['id'], updated_coords)
-            st.success(f"Зона {target} успішно збережена!")
+            st.success(f"Зона {target} збережена!")
             time.sleep(1)
             st.rerun()
 
 elif menu == "📄 Сканер":
     if not all(current_coords.values()): 
-        st.error("Налаштуйте трафарет!")
+        st.error("Спочатку налаштуйте всі зони трафарету в Налаштуваннях!")
     else:
-        p_files = st.file_uploader("1. Паспорти", accept_multiple_files=True)
-        if p_files and st.button("🔍 Сканувати"):
+        p_files = st.file_uploader("1. Завантажте Паспорти", accept_multiple_files=True)
+        if p_files and st.button("🔍 Почати сканування"):
             st.session_state.scanned_data, st.session_state.passport_payload = [], []
-            for i, f in enumerate(p_files):
-                img_np = np.array(Image.open(f).convert("RGB").resize((1920, 1080)))
-                res = {}
-                for lbl, (x, y, w, h) in current_coords.items():
-                    crop = img_np[int(y):int(y+h), int(x):int(x+w)]
-                    txt = " ".join([t[1] for t in reader.readtext(crop)])
-                    res[lbl] = "".join(re.findall(r'\d+', txt)) if lbl == "ID" else re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt).capitalize()
-                st.session_state.scanned_data.append(res)
-                st.session_state.passport_payload.append((f"p{i}", (f"p_{i}.jpg", compress_image(f).read(), "image/jpeg")))
+            
+            with st.status("Обробка зображень...") as status:
+                for i, f in enumerate(p_files):
+                    # Важливо: використовуємо той самий розмір 1920x1080 для OCR
+                    img_pil = Image.open(f).convert("RGB").resize((1920, 1080))
+                    img_np = np.array(img_pil)
+                    res = {}
+                    
+                    for lbl, (x, y, w, h) in current_coords.items():
+                        # Захист від помилок індексації numpy
+                        y_end, x_end = int(y+h), int(x+w)
+                        crop = img_np[int(y):y_end, int(x):x_end]
+                        
+                        if crop.size == 0:
+                            res[lbl] = "Помилка зони"
+                            continue
+                            
+                        # Розпізнавання
+                        ocr_result = reader.readtext(crop)
+                        txt = " ".join([t[1] for t in ocr_result])
+                        
+                        if lbl == "ID":
+                            res[lbl] = "".join(re.findall(r'\d+', txt))
+                        else:
+                            # Очищення тексту для імені/прізвища
+                            clean_txt = re.sub(r'[^a-zA-Zа-яА-ЯіїєґІЇЄҐ]', '', txt)
+                            res[lbl] = clean_txt.capitalize()
+                    
+                    st.session_state.scanned_data.append(res)
+                    st.session_state.passport_payload.append(
+                        (f"p{i}", (f"p_{i}.jpg", compress_image(f).read(), "image/jpeg"))
+                    )
+                status.update(label="Сканування завершено!", state="complete")
             st.rerun()
 
+        # Вивід результатів (залишається без змін)
         if st.session_state.get('scanned_data'):
             final = []
             for idx, item in enumerate(st.session_state.scanned_data):
                 cols = st.columns([3, 3, 2])
-                s = cols[0].text_input(f"Прізвище #{idx+1}", item['Surname'], key=f"s_{idx}")
-                n = cols[1].text_input(f"Ім'я #{idx+1}", item['Name'], key=f"n_{idx}")
-                u = cols[2].text_input(f"ID #{idx+1}", item['ID'], key=f"u_{idx}")
+                s = cols[0].text_input(f"Прізвище #{idx+1}", item.get('Surname', ''), key=f"s_{idx}")
+                n = cols[1].text_input(f"Ім'я #{idx+1}", item.get('Name', ''), key=f"n_{idx}")
+                u = cols[2].text_input(f"ID #{idx+1}", item.get('ID', ''), key=f"u_{idx}")
                 final.append({"Surname": s, "Name": n, "ID": u})
             
+            # Блок відправки (твій оригінальний код)
             c_files = st.file_uploader("2. Докази", accept_multiple_files=True)
             if st.button("🚀 ВІДПРАВИТИ ЗВІТ"):
-                if not c_files: st.error("Додайте докази.")
+                if not c_files: 
+                    st.error("Додайте докази (скріншоти видачі).")
                 else:
-                    # Твій новий формат
                     user_mention = f"<@{user['id']}>"
-                    server_nick = user['username']
-                    user_info_report = f"{user_mention} | {server_nick}"
-                    
-                    msg = f"🏥 **ЗВІТ**\n**Співробітник:** {user_info_report}\n**К-сть:** {len(final)}\n\n" + \
+                    msg = f"🏥 **ЗВІТ**\n**Співробітник:** {user_mention} | {user['username']}\n**К-сть:** {len(final)}\n\n" + \
                           "\n".join([f"• {r['Surname']} {r['Name']} [ID: {r['ID']}]" for r in final])
                     
                     try:
@@ -389,8 +403,14 @@ elif menu == "📄 Сканер":
                         c_pay = [(f"c{i}", (f"c_{i}.jpg", compress_image(cf).read(), "image/jpeg")) for i, cf in enumerate(c_files)]
                         requests.post(st.secrets["DISCORD_WEBHOOK_URL"], data={"content": "💳 **Докази:**"}, files=c_pay)
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
-                        conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
-                    except Exception as e: st.error(f"Помилка: {e}")
+                        conn.commit()
+                        st.success("Звіт надіслано успішно!")
+                        st.session_state.scanned_data = []
+                        time.sleep(2)
+                        st.rerun()
+                    except Exception as e: 
+                        st.error(f"Помилка відправки: {e}")
+
 
 
 
