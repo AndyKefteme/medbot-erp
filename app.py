@@ -270,7 +270,7 @@ elif menu == "📊 Адмін-панель":
 elif menu == "⚙️ Налаштування":
     st.header("📐 Налаштування трафарету")
     
-    # Статус зон
+    # 1. Візуальний статус налаштувань
     c1, c2, c3 = st.columns(3)
     c1.write(f"Прізвище: {'✅' if current_coords.get('Surname') else '❌'}")
     c2.write(f"Ім'я: {'✅' if current_coords.get('Name') else '❌'}")
@@ -280,47 +280,68 @@ elif menu == "⚙️ Налаштування":
         save_user_coords(user['id'], {"Surname": None, "Name": None, "ID": None})
         st.rerun()
     
-    f = st.file_uploader("Завантажте зразок фото", type=['png','jpg','jpeg'])
+    f = st.file_uploader("Завантажте зразок фото (паспорт)", type=['png','jpg','jpeg'])
+    
     if f:
         # Відкриваємо оригінал
         img_orig = Image.open(f).convert("RGB")
         
+        # Налаштування масштабу та вибір зони
         col_ctrl1, col_ctrl2 = st.columns([2, 3])
         with col_ctrl1:
-            target = st.selectbox("Оберіть зону", ["Surname", "Name", "ID"])
+            target = st.selectbox("Оберіть зону для виділення", ["Surname", "Name", "ID"])
         with col_ctrl2:
-            # ДОДАЄМО ЗУМ: від 100% до 300%
-            zoom_factor = st.slider("🔍 Масштаб зображення (%)", 100, 300, 100, step=10)
+            zoom_factor = st.slider("🔍 Масштаб зображення (%)", 100, 400, 100, step=10)
         
-        # Обчислюємо новий розмір для відображення
-        new_w = int(1920 * (zoom_factor / 100))
-        new_h = int(1080 * (zoom_factor / 100))
+        # Розрахунок розміру відображення:
+        # Базова ширина для 100% масштабу (можна підкоригувати під свій екран)
+        display_width_100 = 1200 
+        new_w = int(display_width_100 * (zoom_factor / 100))
+        new_h = int(new_w * (1080 / 1920)) # Зберігаємо пропорції 16:9
+        
         img_display = img_orig.resize((new_w, new_h))
         
-        # Відображення кроппера зі збільшеним фото
-        # box_color зробимо яскравим для зручності
-        rect = st_cropper(img_display, realtime_update=True, box_color='#00FF00', return_type='box')
+        st.info(f"Наближення: {zoom_factor}%. Якщо фото не влазить — скористайтеся полосою прокрутки внизу.")
         
-        if st.button(f"💾 Зберегти зону {target}"):
-            # Важливо: перераховуємо координати назад у масштаб 1920x1080
-            # щоб OCR потім не помилився
-            scale = zoom_factor / 100
+        # Обгортаємо кроппер у контейнер із прокруткою (CSS)
+        st.markdown(
+            f'<div style="width: 100%; overflow-x: auto; border: 1px solid #444; border-radius: 10px;">', 
+            unsafe_allow_html=True
+        )
+        
+        # Кроппер із забороною автоматичного ресайзу
+        rect = st_cropper(
+            img_display, 
+            realtime_update=True, 
+            box_color='#00FF00', 
+            return_type='box',
+            should_resize_image=False # Це змушує його тримати заданий нами new_w
+        )
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        if st.button(f"💾 Зберегти зону {target}", type="primary"):
+            # Коефіцієнт масштабу відносно ідеального розміру 1920x1080
+            # (координати в базу мають лягати так, ніби фото завжди 1920x1080)
+            actual_scale = new_w / 1920
             
+            # Робимо копію, щоб не було проблем із посиланнями в пам'яті
             updated_coords = {
                 "Surname": current_coords.get("Surname"),
                 "Name": current_coords.get("Name"),
                 "ID": current_coords.get("ID")
             }
             
+            # Перераховуємо координати назад у 1920x1080
             updated_coords[target] = (
-                int(rect['left'] / scale), 
-                int(rect['top'] / scale), 
-                int(rect['width'] / scale), 
-                int(rect['height'] / scale)
+                int(rect['left'] / actual_scale), 
+                int(rect['top'] / actual_scale), 
+                int(rect['width'] / actual_scale), 
+                int(rect['height'] / actual_scale)
             )
             
             save_user_coords(user['id'], updated_coords)
-            st.success(f"Зона {target} збережена (з урахуванням масштабу)!")
+            st.success(f"Зона {target} успішно збережена!")
             time.sleep(1)
             st.rerun()
 
@@ -370,6 +391,7 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
 
 
 
