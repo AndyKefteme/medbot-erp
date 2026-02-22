@@ -17,17 +17,29 @@ st.set_page_config(
     layout="wide", 
     page_title="MedBot ERP Pro", 
     page_icon="🏥",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded" # Це змусить панель бути відкритою при завантаженні
 )
 
-# Стилі для приховування кнопок GitHub, Deploy та меню
+# Виправлені стилі: приховуємо зайве, але залишаємо стрілочку зліва зверху
 st.markdown("""
     <style>
+    /* Приховуємо головне меню (три крапки) */
     #MainMenu {visibility: hidden;}
+    /* Приховуємо хедер, але дозволяємо взаємодію з елементами керування */
     header {visibility: hidden;}
+    /* Повертаємо видимість кнопці сайдбару */
+    .st-emotion-cache-hpj0wo {visibility: visible !important; left: 0;}
+    /* Приховуємо футер та кнопку Deploy */
     footer {visibility: hidden;}
     .stDeployButton {display:none;}
+    /* Вимикаємо тулбар зверху */
     [data-testid="stToolbar"] {visibility: hidden !important;}
+    
+    /* Додатково: робимо кнопку розгортання сайдбару видимою */
+    button[data-testid="sidebar-toggle"] {
+        visibility: visible !important;
+        background-color: rgba(255, 75, 75, 0.1); /* Трохи підсвітимо її */
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -332,6 +344,7 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
 
 
 
