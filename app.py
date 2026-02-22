@@ -17,44 +17,40 @@ st.set_page_config(
     layout="wide", 
     page_title="MedBot ERP Pro", 
     page_icon="🏥",
-    initial_sidebar_state="expanded" # Завжди відкрита при завантаженні
-)
-
-# СТИЛІ: ВИДАЛЯЄМО МОЖЛИВІСТЬ ЗГОРТАННЯ
-st.set_page_config(
-    layout="wide", 
-    page_title="MedBot ERP Pro", 
-    page_icon="🏥",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""
     <style>
-    /* 1. ПРИМУСОВО показуємо сайдбар, навіть якщо він collapsed */
-    [data-testid="stSidebar"] {
-        display: block !important;
-        visibility: visible !important;
-        width: 300px !important;
-        left: 0 !important;
-        transform: none !important; /* Відміняє анімацію згортання */
-        transition: none !important;
+    /* 1. ПРИМУСОВО ВИДАЛЯЄМО КНОПКУ ЗГОРТАННЯ */
+    button[data-testid="sidebar-toggle"], 
+    [data-testid="collapsedControl"] {
+        display: none !important;
+        visibility: hidden !important;
     }
-    
-    /* 2. Коригуємо головний контент, щоб він не налізав на панель */
-    [data-testid="stMain"] {
+
+    /* 2. БЛОКУЄМО БУДЬ-ЯКЕ ПРИХОВУВАННЯ ПАНЕЛІ */
+    /* Цей блок змушує сайдбар завжди мати ширину і бути видимим */
+    section[data-testid="stSidebar"] {
+        min-width: 300px !important;
+        margin-left: 0 !important;
+        transform: none !important;
+        transition: none !important;
+        display: block !important;
+    }
+
+    /* 3. КОРИГУЄМО ГОЛОВНЕ ВІКНО */
+    /* Щоб воно не "пливло" і завжди знало, що зліва є панель */
+    .st-emotion-cache-1avcm0n, .st-emotion-cache-6q9sum {
         margin-left: 300px !important;
     }
 
-    /* 3. Видаляємо кнопку згортання (стрілочку) */
-    button[data-testid="sidebar-toggle"] {
-        display: none !important;
-    }
-    
-    /* 4. Приховуємо сміття */
+    /* 4. ПРИХОВУЄМО ІНШЕ СМІТТЯ */
     .stDeployButton {display:none;}
     #MainMenu {visibility: hidden;}
     header {visibility: hidden;}
     footer {visibility: hidden;}
+    [data-testid="stToolbar"] {visibility: hidden !important;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -359,6 +355,7 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
 
 
 
