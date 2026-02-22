@@ -21,27 +21,40 @@ st.set_page_config(
 )
 
 # СТИЛІ: ВИДАЛЯЄМО МОЖЛИВІСТЬ ЗГОРТАННЯ
+st.set_page_config(
+    layout="wide", 
+    page_title="MedBot ERP Pro", 
+    page_icon="🏥",
+    initial_sidebar_state="expanded"
+)
+
 st.markdown("""
     <style>
-    /* 1. Повністю видаляємо кнопку згортання сайдбару (стрілочку) */
+    /* 1. ПРИМУСОВО показуємо сайдбар, навіть якщо він collapsed */
+    [data-testid="stSidebar"] {
+        display: block !important;
+        visibility: visible !important;
+        width: 300px !important;
+        left: 0 !important;
+        transform: none !important; /* Відміняє анімацію згортання */
+        transition: none !important;
+    }
+    
+    /* 2. Коригуємо головний контент, щоб він не налізав на панель */
+    [data-testid="stMain"] {
+        margin-left: 300px !important;
+    }
+
+    /* 3. Видаляємо кнопку згортання (стрілочку) */
     button[data-testid="sidebar-toggle"] {
         display: none !important;
     }
     
-    /* 2. Приховуємо кнопку 'Deploy', GitHub та меню 'три крапки' */
+    /* 4. Приховуємо сміття */
     .stDeployButton {display:none;}
     #MainMenu {visibility: hidden;}
     header {visibility: hidden;}
     footer {visibility: hidden;}
-    
-    /* 3. Блокуємо можливість згортання панелі через перетягування (для мобільних) */
-    [data-testid="stSidebar"] {
-        min-width: 250px !important;
-        max-width: 350px !important;
-    }
-    
-    /* 4. Приховуємо тулбар (опціонально) */
-    [data-testid="stToolbar"] {visibility: hidden !important;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -346,6 +359,7 @@ elif menu == "📄 Сканер":
                         cursor.execute("INSERT INTO logs VALUES (?, ?, ?, ?)", (user['id'], user['username'], len(final), datetime.now().strftime("%Y-%m-%d %H:%M")))
                         conn.commit(); st.success("Надіслано!"); st.session_state.scanned_data = []; time.sleep(2); st.rerun()
                     except Exception as e: st.error(f"Помилка: {e}")
+
 
 
 
